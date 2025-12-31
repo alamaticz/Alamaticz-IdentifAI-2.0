@@ -7,7 +7,8 @@ import asyncio
 import nest_asyncio
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
-from langchain.agents import AgentType, initialize_agent
+from langchain.agents import AgentExecutor, create_openai_functions_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
 from opensearchpy import OpenSearch
@@ -634,17 +635,22 @@ elif page == "Chat Agent":
                     
                     model = ChatOpenAI(model="gpt-4o", streaming=True)
                     
-                    agent = initialize_agent(
+                    prompt = ChatPromptTemplate.from_messages([
+                        ("system", "You are a helpful Log Analysis Assistant. You have access to OpenSearch logs. You usually don't need to mention Tool names. IMPORTANT: When searching for errors or logs, ALWAYS search across 'log.message', 'exception_message', and 'log.exception.exception_message' fields. Do not rely on a single field."),
+                        MessagesPlaceholder(variable_name="chat_history"),
+                        ("human", "{input}"),
+                        MessagesPlaceholder(variable_name="agent_scratchpad"),
+                    ])
+
+                    agent_def = create_openai_functions_agent(model, tools, prompt)
+                    
+                    agent = AgentExecutor(
+                        agent=agent_def,
                         tools=tools,
-                        llm=model,
-                        agent=AgentType.OPENAI_FUNCTIONS,
                         verbose=True,
                         handle_parsing_errors=True,
                         return_intermediate_steps=True,
-                        memory=st.session_state.agent_memory,
-                        agent_kwargs={
-                            "system_message": "You are a helpful Log Analysis Assistant. You have access to OpenSearch logs. You usually don't need to mention Tool names. IMPORTANT: When searching for errors or logs, ALWAYS search across 'log.message', 'exception_message', and 'log.exception.exception_message' fields. Do not rely on a single field."
-                        }
+                        memory=st.session_state.agent_memory
                     )
 
                     # Create a placeholder for status updates
