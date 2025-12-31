@@ -1,0 +1,12 @@
+streamlit
+pandas
+plotly
+python-dotenv
+opensearch-py
+langchain
+langchain-openai
+langchain-community
+langchain-mcp-adapters
+nest_asyncio
+tqdm
+mcp-server-opensearch
