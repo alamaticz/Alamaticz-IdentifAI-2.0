@@ -5,6 +5,9 @@ import uuid
 import re
 import hashlib
 from typing import Dict, List, Optional
+import zipfile
+import tempfile
+import shutil
 from dotenv import load_dotenv
 from opensearchpy import OpenSearch, helpers
 
@@ -251,8 +254,8 @@ def ensure_index(client):
         # We might want to update mapping here if needed, but for now just assume it exists
         print(f"Index already exists: {INDEX_NAME}")
 
-def ingest_file(file_path: str):
-    """Ingest a single file into OpenSearch."""
+def ingest_single_file(file_path: str):
+    """Ingest a single file into OpenSearch (internal helper)."""
     client = get_opensearch_client()
     ensure_index(client)
     
@@ -410,6 +413,55 @@ def ingest_file(file_path: str):
         "ignored": ignored_local,
         "file_name": file_name
     }
+
+def ingest_file(file_path: str):
+    """Ingest a file (or ZIP of files) into OpenSearch."""
+    # Check extension
+    if file_path.lower().endswith(".zip"):
+        print(f"Detected ZIP file: {file_path}")
+        
+        # Aggregate results
+        aggregated_result = {
+            "status": "success",
+            "session_id": str(uuid.uuid4()),
+            "total_indexed": 0,
+            "failed": 0,
+            "duplicates_skipped": 0,
+            "ignored": 0,
+            "files_processed": []
+        }
+        
+        # Create temp dir
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                
+                # Walk through extracted files
+                for root, dirs, files in os.walk(temp_dir):
+                    for file in files:
+                        full_path = os.path.join(root, file)
+                        # Skip hidden files or non-logs if desired, but we'll try everything that looks like text
+                        # Or strictly: if file.endswith(".log") or file.endswith(".json") or file.endswith(".txt"):
+                        
+                        print(f"Processing extracted file: {file}")
+                        res = ingest_single_file(full_path)
+                        
+                        aggregated_result["total_indexed"] += res.get("total_indexed", 0)
+                        aggregated_result["failed"] += res.get("failed", 0)
+                        aggregated_result["duplicates_skipped"] += res.get("duplicates_skipped", 0)
+                        aggregated_result["ignored"] += res.get("ignored", 0)
+                        aggregated_result["files_processed"].append(file)
+                
+                print(f"ZIP Ingestion Complete. Processed {len(aggregated_result['files_processed'])} files.")
+                return aggregated_result
+                
+            except Exception as e:
+                print(f"Error processing ZIP: {e}")
+                return {"status": "error", "message": str(e)}
+    else:
+        # Regular single file
+        return ingest_single_file(file_path)
 
 if __name__ == "__main__":
     import argparse
