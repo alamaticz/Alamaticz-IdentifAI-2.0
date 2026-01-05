@@ -275,6 +275,7 @@ def fetch_detailed_table_data(client, size=1000):
             
             data.append({
                 "doc_id": hit['_id'],
+                "last_seen": src.get('last_seen'),
                 "group_signature": src.get('group_signature'),
                 "group_type": src.get('group_type'),
                 "count": src.get('count'),
@@ -285,7 +286,10 @@ def fetch_detailed_table_data(client, size=1000):
                 "logger_name": rep.get('logger_name'),
                 "diagnosis.report": src.get('diagnosis', {}).get('report')
             })
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        if not df.empty and 'last_seen' in df.columns:
+            df['last_seen'] = pd.to_datetime(df['last_seen'])
+        return df
     except Exception as e:
         st.error(f"Error fetching details: {e}")
         return pd.DataFrame()
@@ -521,6 +525,7 @@ if page == "Dashboard":
                 use_container_width=True,
                 column_config={
                     "doc_id": None, 
+                    "last_seen": st.column_config.DatetimeColumn("Last Seen", format="D MMM YYYY, h:mm a"),
                     "count": st.column_config.ProgressColumn("Count", format="%d", min_value=0, max_value=int(df_details['count'].max())),
                     "diagnosis.status": st.column_config.SelectboxColumn("Status", options=all_options, required=True),
                     "group_signature": st.column_config.TextColumn("Full Signature", width="small", help="Unique signature defining this group"),
@@ -531,7 +536,7 @@ if page == "Dashboard":
                     "logger_name": "Logger",
                     "diagnosis.report": "Report"
                 },
-                disabled=["group_signature", "group_type", "count", "display_rule", 
+                disabled=["last_seen", "group_signature", "group_type", "count", "display_rule", 
                           "exception_summary", "message_summary", "logger_name", "diagnosis.report"],
                 hide_index=True,
                 key="detailed_table"
