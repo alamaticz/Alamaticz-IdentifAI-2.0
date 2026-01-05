@@ -51,6 +51,35 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- Login Authentication ---
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+def login_page():
+    # Centered container for login
+    _, col2, _ = st.columns([1, 1, 1])
+    with col2:
+        if os.path.exists("assets/logo.jpg"):
+            st.image("assets/logo.jpg", use_container_width=True)
+        else:
+            st.header("IdentifAI 2.0")
+        
+        st.markdown("<h3 style='text-align: center;'>Please Sign In</h3>", unsafe_allow_html=True)
+        
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        
+        if st.button("Login", type="primary", use_container_width=True):
+            if username == "alamaticz" and password == "Alamaticz#2024":
+                st.session_state.logged_in = True
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+
+if not st.session_state.logged_in:
+    login_page()
+    st.stop()
+
 # --- Custom CSS for Styling ---
 st.markdown("""
     <style>
