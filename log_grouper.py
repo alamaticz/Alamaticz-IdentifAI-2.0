@@ -90,7 +90,7 @@ def update_checkpoint(client, timestamp):
     except Exception as e:
         print(f"[WARN] Failed to update checkpoint: {e}")
 
-def process_logs(limit=None, batch_size=500):
+def process_logs(limit=None, batch_size=200):
     """
     Main processing loop.
     Scanning -> Grouping -> Bulk Indexing
@@ -243,34 +243,38 @@ def process_logs(limit=None, batch_size=500):
         # OpenSearch Set implementation in painless is easiest via checking contains.
         
         script_source = """
+            // Initialize fields defensively (important for concurrency)
+            if (ctx._source.count == null) ctx._source.count = 0;
+            if (ctx._source.raw_log_ids == null) ctx._source.raw_log_ids = [];
+            if (ctx._source.exception_signatures == null) ctx._source.exception_signatures = [];
+            if (ctx._source.message_signatures == null) ctx._source.message_signatures = [];
+
+            // Increment counters
             ctx._source.count += params.inc;
             ctx._source.last_seen = params.last_seen;
-            
-            // Add raw log ID (capped at 50 to avoid huge docs)
+
+            // Add raw log ID (cap at 50)
             if (ctx._source.raw_log_ids.size() < 50 && !ctx._source.raw_log_ids.contains(params.new_id)) {
                 ctx._source.raw_log_ids.add(params.new_id);
             }
-            
-            // Add Unique Normalized Exception Signature
+
+            // Add unique normalized exception signature
             if (params.norm_exc != null && params.norm_exc != "") {
                 if (!ctx._source.exception_signatures.contains(params.norm_exc)) {
                     ctx._source.exception_signatures.add(params.norm_exc);
                 }
             }
-            
-            // Add Unique Normalized Message Signature
+
+            // Add unique normalized message signature
             if (params.norm_msg != null && params.norm_msg != "") {
                 if (!ctx._source.message_signatures.contains(params.norm_msg)) {
                     ctx._source.message_signatures.add(params.norm_msg);
                 }
             }
-            
-            
-            // Add Unique Raw Index Key (Group Signature)
 
-            
-            // Update representative log (always keep latest)
+            // Always keep latest representative log
             ctx._source.representative_log = params.rep_log;
+
         """
 
         upsert_doc = {
@@ -294,6 +298,7 @@ def process_logs(limit=None, batch_size=500):
             "_op_type": "update",
             "_index": DEST_INDEX,
             "_id": group_id,
+            "retry_on_conflict": 5,
             "script": {
                 "source": script_source,
                 "lang": "painless",
@@ -313,15 +318,62 @@ def process_logs(limit=None, batch_size=500):
         
         # Flush Bulk
         if len(bulk_actions) >= batch_size:
-            helpers.bulk(client, bulk_actions)
-            bulk_actions = []
-            print(f"  Indexed {processed_count} logs...", end='\r')
+            success, errors = helpers.bulk(
+                client,
+                bulk_actions,
+                raise_on_error=False,
+                raise_on_exception=False
+            )
+
+            time.sleep(0.2)  # 200ms backoff
+
+            if errors:
+                conflict_count = 0
+                other_errors = 0
+
+                for e in errors:
+                    e_str = str(e)
+                    if "version_conflict_engine_exception" in e_str:
+                        conflict_count += 1
+                    else:
+                        other_errors += 1
+
+                if conflict_count:
+                    print(f"[WARN] {conflict_count} version conflicts (safe to ignore)")
+                if other_errors:
+                    print(f"[ERROR] {other_errors} non-conflict bulk errors detected")
+
+    bulk_actions = []
+    print(f"  Indexed {processed_count} logs...", end='\r')
+
 
     # Final Flush
     if bulk_actions:
-        helpers.bulk(client, bulk_actions)
-    
-    print(f"\n[SUCCESS] Processed {processed_count} logs.")
+        success, errors = helpers.bulk(
+            client,
+            bulk_actions,
+            raise_on_error=False,
+            raise_on_exception=False
+        )
+
+        time.sleep(0.2)  # 200ms backoff
+
+        if errors:
+            conflict_count = 0
+            other_errors = 0
+
+            for e in errors:
+                e_str = str(e)
+                if "version_conflict_engine_exception" in e_str:
+                    conflict_count += 1
+                else:
+                    other_errors += 1
+
+            if conflict_count:
+                print(f"[WARN] {conflict_count} version conflicts (safe to ignore)")
+            if other_errors:
+                print(f"[ERROR] {other_errors} non-conflict bulk errors detected")
+
     
     # Update Checkpoint if we processed anything
     if latest_seen_timestamp and latest_seen_timestamp != last_checkpoint:
