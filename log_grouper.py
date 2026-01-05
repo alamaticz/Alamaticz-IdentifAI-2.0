@@ -357,9 +357,9 @@ def process_logs(limit=None, batch_size=100):
                     print(f"[ERROR] {len(other_errors)} non-conflict bulk errors detected")
                     print("[ERROR] Sample error:")
                     print(other_errors[0])
-
-    bulk_actions = []
-    print(f"  Indexed {processed_count} logs...", end='\r')
+            
+            bulk_actions = []
+            print(f"  Indexed {processed_count} logs...", end='\r')
 
 
     # Final Flush
