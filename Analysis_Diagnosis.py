@@ -6,10 +6,36 @@ import asyncio
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentType, initialize_agent
+from langchain_community.callbacks import get_openai_callback
+import re
 from dotenv import load_dotenv
 
 # Load envs
+# Load envs
 load_dotenv()
+
+def clean_markdown(text):
+    """
+    Strips markdown formatting to return clean plain text.
+    Removes: **bold**, ## Headers, `code`, and ```blocks```.
+    """
+    # Remove code block markers
+    text = re.sub(r'```[a-zA-Z]*\n?', '', text)
+    text = re.sub(r'```', '', text)
+    
+    # Remove inline code backticks
+    text = re.sub(r'`', '', text)
+    
+    # Remove bold/italic markers (* or _)
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # **bold**
+    text = re.sub(r'\*([^*]+)\*', r'\1', text)      # *italic*
+    text = re.sub(r'__([^_]+)__', r'\1', text)      # __bold__
+    text = re.sub(r'_([^_]+)_', r'\1', text)        # _italic_
+    
+    # Remove headers (### Header)
+    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+    
+    return text.strip()
 
 def get_opensearch_client():
     OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL")
@@ -71,7 +97,7 @@ def fetch_grouped_errors(client, size=5):
 
 
 
-def update_diagnosis_in_opensearch(client, doc_id, diagnosis_text):
+def update_diagnosis_in_opensearch(client, doc_id, diagnosis_text, token_usage=None):
     """
     Update the grouped document with diagnosis results.
     """
@@ -82,7 +108,9 @@ def update_diagnosis_in_opensearch(client, doc_id, diagnosis_text):
             "diagnosis": {
                 "status": "COMPLETED",
                 "report": diagnosis_text,
-                "timestamp": datetime.utcnow().isoformat()
+                "report": diagnosis_text,
+                "timestamp": datetime.utcnow().isoformat(),
+                "token_usage": token_usage or {}
             }
         }
     }
@@ -164,37 +192,50 @@ async def run_diagnosis_workflow():
             Data Provided:
             {context_str}
             
-            Perform a deep technical diagnosis and output a report in Markdown format with the following sections:
+            Perform a deep technical diagnosis and output a report in CLEAN PLAIN TEXT format. 
+            DO NOT USE MARKDOWN (No #, *, or backticks). Use simple upper case for headers.
 
-            ### 1. Executive Summary
+            Sections:
+
+            1. EXECUTIVE SUMMARY
             (One concise sentence describing the issue)
 
-            ### 2. Severity Assessment
+            2. SEVERITY ASSESSMENT
             (CRITICAL / MAJOR / MINOR) - Justify your choice based on the error type.
 
-            ### 3. Error Flow & Point of Failure
-            *   **Execution Path**: Analyze the `group_signature` (especially if it contains '->'). Reconstruct the call stack (e.g., "Activity A calls Activity B").
-            *   **Point of Failure**: Identify the EXACT Rule or Step where the error occurred based on the signature and exception.
+            3. ERROR FLOW & POINT OF FAILURE
+            Execution Path: Analyze the `group_signature`. Reconstruct the call stack (e.g., "Activity A calls Activity B").
+            Point of Failure: Identify the EXACT Rule or Step where the error occurred.
 
-            ### 4. Root Cause Analysis
-            Explain *why* this error happened. Connect the Exception message (e.g., NullPointer) to the specific Rule context.
+            4. ROOT CAUSE ANALYSIS
+            Explain *why* this error happened. Connect the Exception message to the specific Rule context.
 
-            ### 5. Impact Analysis
-            What functional part of the system is likely broken? (e.g., "User cannot open Portal", "Background processing failed").
+            5. IMPACT ANALYSIS
+            What functional part of the system is likely broken?
 
-            ### 6. Step-by-Step Resolution
+            6. STEP-BY-STEP RESOLUTION
             Provide concrete, Pega-specific steps for a developer to fix this.
-            *   **Debugging**: Mention specific tools (e.g., "Run Tracer on Activity X", "Check Clipboard Page Y").
-            *   **Fix**: Suggest code changes (e.g., "Add a null check in Step 2", "Update Data Transform").
+            Debugging: Mention specific tools (e.g., "Run Tracer on Activity X").
+            Fix: Suggest code changes (e.g., "Add a null check in Step 2").
             '''
 
             # Invoke Agent
             try:
-                response = await agent.ainvoke({"input": prompt})
-                diagnosis_text = response["output"]
-                
+                with get_openai_callback() as cb:
+                    response = await agent.ainvoke({"input": prompt})
+                    raw_text = response["output"]
+                    diagnosis_text = clean_markdown(raw_text)
+                    
+                    token_usage = {
+                        "total_tokens": cb.total_tokens,
+                        "prompt_tokens": cb.prompt_tokens,
+                        "completion_tokens": cb.completion_tokens,
+                        "total_cost": cb.total_cost
+                    }
+                    print(f"  Diagnosis Cost: ${cb.total_cost:.4f} (Tokens: {cb.total_tokens})")
+
                 # Write back to OpenSearch
-                update_diagnosis_in_opensearch(client, group_id, diagnosis_text)
+                update_diagnosis_in_opensearch(client, group_id, diagnosis_text, token_usage)
                 
             except Exception as exc:
                 print(f"Failed to diagnose group {group_id}: {exc}")
