@@ -7,7 +7,8 @@ import asyncio
 import nest_asyncio
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_tool_calling_agent
+from langchain.agents.output_parsers.openai_tools import OpenAIToolsAgentOutputParser
+from langchain.agents.format_scratchpad.openai_tools import format_to_openai_tool_messages
 from langchain.agents.agent import AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
@@ -643,7 +644,16 @@ elif page == "Chat Agent":
                         MessagesPlaceholder(variable_name="agent_scratchpad"),
                     ])
 
-                    agent_def = create_tool_calling_agent(model, tools, prompt)
+                    agent_def = (
+                        {
+                            "input": lambda x: x["input"],
+                            "agent_scratchpad": lambda x: format_to_openai_tool_messages(x["intermediate_steps"]),
+                            "chat_history": lambda x: x.get("chat_history", [])
+                        }
+                        | prompt
+                        | model.bind_tools(tools)
+                        | OpenAIToolsAgentOutputParser()
+                    )
                     
                     agent = AgentExecutor(
                         agent=agent_def,
