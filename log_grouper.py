@@ -10,6 +10,7 @@ import json
 import hashlib
 import time
 import argparse
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 from opensearchpy import OpenSearch, helpers
@@ -49,6 +50,31 @@ def get_opensearch_client():
 def generate_group_id(signature_string):
     """Generate deterministic MD5 hash for a group signature."""
     return hashlib.md5(signature_string.encode('utf-8')).hexdigest()
+
+def extract_csp_signature(message):
+    """
+    Extracts CSP violation details from the raw log message.
+    Returns a signature string in the format:
+    CSP Violation | Blocked: <src> | Violated: <violated> | Effective: <effective>
+    Returns None if not a CSP violation.
+    """
+    if "A browser has reported a violation of your application's Content Security Policy" not in message:
+        return None
+    
+    # Regex patterns
+    blocked_pattern = r"Blocked Content Source:\s*(.+)"
+    violated_pattern = r"Violated Directive:\s*(.+)"
+    effective_pattern = r"Effective Directive:\s*(.+)"
+    
+    blocked_match = re.search(blocked_pattern, message)
+    violated_match = re.search(violated_pattern, message)
+    effective_match = re.search(effective_pattern, message)
+    
+    blocked = blocked_match.group(1).strip() if blocked_match else "Unknown"
+    violated = violated_match.group(1).strip() if violated_match else "Unknown"
+    effective = effective_match.group(1).strip() if effective_match else "Unknown"
+    
+    return f"CSP Violation | Blocked: {blocked} | Violated: {violated} | Effective: {effective}"
 
 def wait_for_connection(client, max_retries=10, delay=5):
     """Wait for OpenSearch to be available."""
@@ -219,12 +245,21 @@ def process_logs(limit=None, batch_size=100):
         # 'logger_name' is often in 'log' -> 'logger_name' or top level depending on schema
         logger_name = source.get("log", {}).get("logger_name") or ""
         
+
         # --- Waterfall Grouping ---
         group_type = "Unanalyzed"
         group_signature_string = ""
         
-        # Scenario 1: Rule Sequence
-        if sequence_signature:
+        # Check for CSP Violation first (Specific Raw Message Check)
+        csp_signature = extract_csp_signature(raw_message)
+
+        # Scenario 1: CSP Violation
+        if csp_signature:
+             group_type = "CSP Violation"
+             group_signature_string = csp_signature
+
+        # Scenario 2: Rule Sequence
+        elif sequence_signature:
             group_type = "RuleSequence"
             group_signature_string = sequence_signature
         
