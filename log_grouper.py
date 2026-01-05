@@ -40,7 +40,7 @@ def get_opensearch_client():
         http_auth=auth,
         verify_certs=False,
         ssl_show_warn=False,
-        timeout=30,
+        timeout=120,
         max_retries=5,
         retry_on_timeout=True,
         retry_on_status=(500, 502, 503, 504)
@@ -55,7 +55,8 @@ def wait_for_connection(client, max_retries=10, delay=5):
     print(f"[INFO] Connecting to OpenSearch at {OPENSEARCH_URL}...")
     for i in range(max_retries):
         try:
-            client.info()
+            # client.info()
+            client.transport.perform_request("GET", "/", timeout=60)
             print("[INFO] Connection established successfully.")
             return True
         except Exception as e:
@@ -90,7 +91,24 @@ def update_checkpoint(client, timestamp):
     except Exception as e:
         print(f"[WARN] Failed to update checkpoint: {e}")
 
-def process_logs(limit=None, batch_size=200):
+def safe_bulk(client, actions, retries=3, backoff=1.0):
+    """
+    Wrapper around helpers.bulk with retry logic for transient errors.
+    """
+    for attempt in range(retries):
+        try:
+            return helpers.bulk(
+                client,
+                actions,
+                raise_on_error=False,
+                raise_on_exception=False
+            )
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            time.sleep(backoff * (attempt + 1))
+
+def process_logs(limit=None, batch_size=100):
     """
     Main processing loop.
     Scanning -> Grouping -> Bulk Indexing
@@ -154,8 +172,8 @@ def process_logs(limit=None, batch_size=200):
         client,
         query=query,
         index=SOURCE_INDEX,
-        scroll="5m",
-        size=batch_size
+        scroll="2m",
+        size=50
     )
 
     processed_count = 0
@@ -318,30 +336,27 @@ def process_logs(limit=None, batch_size=200):
         
         # Flush Bulk
         if len(bulk_actions) >= batch_size:
-            success, errors = helpers.bulk(
-                client,
-                bulk_actions,
-                raise_on_error=False,
-                raise_on_exception=False
-            )
+            success, errors = safe_bulk(client, bulk_actions)
 
-            time.sleep(0.2)  # 200ms backoff
+            time.sleep(0.5)  # 500ms backoff
 
             if errors:
                 conflict_count = 0
-                other_errors = 0
+                other_errors = []
 
                 for e in errors:
                     e_str = str(e)
                     if "version_conflict_engine_exception" in e_str:
                         conflict_count += 1
                     else:
-                        other_errors += 1
+                        other_errors.append(e_str)
 
                 if conflict_count:
                     print(f"[WARN] {conflict_count} version conflicts (safe to ignore)")
                 if other_errors:
-                    print(f"[ERROR] {other_errors} non-conflict bulk errors detected")
+                    print(f"[ERROR] {len(other_errors)} non-conflict bulk errors detected")
+                    print("[ERROR] Sample error:")
+                    print(other_errors[0])
 
     bulk_actions = []
     print(f"  Indexed {processed_count} logs...", end='\r')
@@ -349,30 +364,27 @@ def process_logs(limit=None, batch_size=200):
 
     # Final Flush
     if bulk_actions:
-        success, errors = helpers.bulk(
-            client,
-            bulk_actions,
-            raise_on_error=False,
-            raise_on_exception=False
-        )
+        success, errors = safe_bulk(client, bulk_actions)
 
-        time.sleep(0.2)  # 200ms backoff
+        time.sleep(0.5)  # 500ms backoff
 
         if errors:
             conflict_count = 0
-            other_errors = 0
+            other_errors = []
 
             for e in errors:
                 e_str = str(e)
                 if "version_conflict_engine_exception" in e_str:
                     conflict_count += 1
                 else:
-                    other_errors += 1
+                    other_errors.append(e_str)
 
             if conflict_count:
                 print(f"[WARN] {conflict_count} version conflicts (safe to ignore)")
             if other_errors:
-                print(f"[ERROR] {other_errors} non-conflict bulk errors detected")
+                print(f"[ERROR] {len(other_errors)} non-conflict bulk errors detected")
+                print("[ERROR] Sample error:")
+                print(other_errors[0])
 
     
     # Update Checkpoint if we processed anything
