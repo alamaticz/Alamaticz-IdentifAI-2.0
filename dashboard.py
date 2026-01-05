@@ -7,9 +7,7 @@ import asyncio
 import nest_asyncio
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
-from langchain.agents.output_parsers.openai_tools import OpenAIToolsAgentOutputParser
-from langchain.agents.format_scratchpad.openai_tools import format_to_openai_tool_messages
-from langchain.agents.agent import AgentExecutor
+from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
@@ -689,24 +687,19 @@ elif page == "Chat Agent":
                         MessagesPlaceholder(variable_name="agent_scratchpad"),
                     ])
 
-                    agent_def = (
-                        {
-                            "input": lambda x: x["input"],
-                            "agent_scratchpad": lambda x: format_to_openai_tool_messages(x["intermediate_steps"]),
-                            "chat_history": lambda x: x.get("chat_history", [])
-                        }
-                        | prompt
-                        | model.bind_tools(tools)
-                        | OpenAIToolsAgentOutputParser()
+                    agent = create_tool_calling_agent(
+                        llm=model,
+                        tools=tools,
+                        prompt=prompt
                     )
-                    
-                    agent = AgentExecutor(
-                        agent=agent_def,
+
+                    agent_executor = AgentExecutor(
+                        agent=agent,
                         tools=tools,
                         verbose=True,
+                        memory=st.session_state.agent_memory,
                         handle_parsing_errors=True,
-                        return_intermediate_steps=True,
-                        memory=st.session_state.agent_memory
+                        return_intermediate_steps=True
                     )
 
                     # Create a placeholder for status updates
@@ -715,7 +708,7 @@ elif page == "Chat Agent":
                     full_response = ""
                     try:
                         # Stream events
-                        async for event in agent.astream_events({"input": user_input}, version="v1"):
+                        async for event in agent_executor.astream_events({"input": user_input}, version="v1"):
                             kind = event["event"]
                             
                             if kind == "on_tool_start":
