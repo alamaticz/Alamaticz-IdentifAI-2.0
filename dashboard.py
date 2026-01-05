@@ -3,14 +3,14 @@ import pandas as pd
 import plotly.express as px
 import os
 from dotenv import load_dotenv
-import asyncio
-import nest_asyncio
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_openai import ChatOpenAI
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.memory import ConversationBufferMemory
-from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
+# import asyncio
+# import nest_asyncio
+# from langchain_mcp_adapters.client import MultiServerMCPClient
+# from langchain_openai import ChatOpenAI
+# from langchain.agents import create_tool_calling_agent, AgentExecutor
+# from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+# from langchain.memory import ConversationBufferMemory
+# from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
 from opensearchpy import OpenSearch
 import json
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
@@ -36,8 +36,8 @@ def save_chat_history(messages):
     except Exception as e:
         st.error(f"Error saving chat history: {e}")
 
-# Apply nest_asyncio to allow nested event loops in Streamlit
-nest_asyncio.apply()
+# # Apply nest_asyncio to allow nested event loops in Streamlit
+# nest_asyncio.apply()
 
 # Load environment variables
 load_dotenv(override=True)
@@ -600,165 +600,166 @@ if page == "Dashboard":
 # --- PAGE 2: Chat Agent ---
 elif page == "Chat Agent":
     st.header("💬 AI Assistant")
-    st.markdown("Ask questions about your logs and analysis results.")
+    st.info("Work in Progress")
+    # st.markdown("Ask questions about your logs and analysis results.")
 
-    # Chat History
-    if "messages" not in st.session_state:
-        st.session_state.messages = load_chat_history()
+    # # Chat History
+    # if "messages" not in st.session_state:
+    #     st.session_state.messages = load_chat_history()
         
-        # Add Welcome Message if history is empty
-        if not st.session_state.messages:
-            welcome_msg = {
-                "role": "assistant", 
-                "content": "Welcome to Pega Log Analysis Assistant! I can help you analyze errors, find specific logs, or summarize issues. What would you like to know?"
-            }
-            st.session_state.messages.append(welcome_msg)
-            save_chat_history(st.session_state.messages)
+    #     # Add Welcome Message if history is empty
+    #     if not st.session_state.messages:
+    #         welcome_msg = {
+    #             "role": "assistant", 
+    #             "content": "Welcome to Pega Log Analysis Assistant! I can help you analyze errors, find specific logs, or summarize issues. What would you like to know?"
+    #         }
+    #         st.session_state.messages.append(welcome_msg)
+    #         save_chat_history(st.session_state.messages)
 
-    # Determine avatar
-    if os.path.exists("assets/agent_logo.png"):
-        assistant_avatar = "assets/agent_logo.png"
-    elif os.path.exists("assets/logo.jpg"):
-        assistant_avatar = "assets/logo.jpg"
-    else:
-        assistant_avatar = None
+    # # Determine avatar
+    # if os.path.exists("assets/agent_logo.png"):
+    #     assistant_avatar = "assets/agent_logo.png"
+    # elif os.path.exists("assets/logo.jpg"):
+    #     assistant_avatar = "assets/logo.jpg"
+    # else:
+    #     assistant_avatar = None
 
-    # Display chat messages
-    for message in st.session_state.messages:
-        avatar = assistant_avatar if message["role"] == "assistant" else None
-        with st.chat_message(message["role"], avatar=avatar):
-            st.markdown(message["content"])
+    # # Display chat messages
+    # for message in st.session_state.messages:
+    #     avatar = assistant_avatar if message["role"] == "assistant" else None
+    #     with st.chat_message(message["role"], avatar=avatar):
+    #         st.markdown(message["content"])
 
-    # User Input
-    if prompt := st.chat_input("What would you like to know?"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        save_chat_history(st.session_state.messages)
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # # User Input
+    # if prompt := st.chat_input("What would you like to know?"):
+    #     st.session_state.messages.append({"role": "user", "content": prompt})
+    #     save_chat_history(st.session_state.messages)
+    #     with st.chat_message("user"):
+    #         st.markdown(prompt)
 
-        if os.path.exists("assets/agent_logo.png"):
-             avatar_img = "assets/agent_logo.png"
-        elif os.path.exists("assets/logo.jpg"):
-             avatar_img = "assets/logo.jpg"
-        else:
-             avatar_img = None
+    #     if os.path.exists("assets/agent_logo.png"):
+    #          avatar_img = "assets/agent_logo.png"
+    #     elif os.path.exists("assets/logo.jpg"):
+    #          avatar_img = "assets/logo.jpg"
+    #     else:
+    #          avatar_img = None
 
-        with st.chat_message("assistant", avatar=avatar_img):
-            # Wrapper for async execution
-            try:
-                # Get or create event loop for this thread
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+    #     with st.chat_message("assistant", avatar=avatar_img):
+    #         # Wrapper for async execution
+    #         try:
+    #             # Get or create event loop for this thread
+    #             try:
+    #                 loop = asyncio.get_event_loop()
+    #             except RuntimeError:
+    #                 loop = asyncio.new_event_loop()
+    #                 asyncio.set_event_loop(loop)
 
-                async def run_agent_async(user_input):
-                    # Manage Memory in Session State
-                    if "agent_memory" not in st.session_state:
-                         st.session_state.agent_memory = ConversationBufferMemory(
-                            memory_key="chat_history",
-                            return_messages=True,
-                            input_key="input",
-                            output_key="output"
-                        )
+    #             async def run_agent_async(user_input):
+    #                 # Manage Memory in Session State
+    #                 if "agent_memory" not in st.session_state:
+    #                      st.session_state.agent_memory = ConversationBufferMemory(
+    #                         memory_key="chat_history",
+    #                         return_messages=True,
+    #                         input_key="input",
+    #                         output_key="output"
+    #                     )
                     
-                    # Connect to OpenSearch MCP
-                    mcp_server_config = {
-                        "opensearch": { 
-                            "url": "http://localhost:9900/sse",
-                            "transport": "sse",
-                            "headers": {
-                                "Content-Type": "application/json",
-                                "Accept-Encoding": "identity",
-                            }
-                        }
-                    }
+    #                 # Connect to OpenSearch MCP
+    #                 mcp_server_config = {
+    #                     "opensearch": { 
+    #                         "url": "http://localhost:9900/sse",
+    #                         "transport": "sse",
+    #                         "headers": {
+    #                             "Content-Type": "application/json",
+    #                             "Accept-Encoding": "identity",
+    #                         }
+    #                     }
+    #                 }
                     
-                    client = MultiServerMCPClient(mcp_server_config)
-                    tools = await client.get_tools() 
+    #                 client = MultiServerMCPClient(mcp_server_config)
+    #                 tools = await client.get_tools() 
                     
-                    model = ChatOpenAI(model="gpt-4o", streaming=True)
+    #                 model = ChatOpenAI(model="gpt-4o", streaming=True)
                     
-                    prompt = ChatPromptTemplate.from_messages([
-                        ("system", "You are a helpful Log Analysis Assistant. You have access to OpenSearch logs. You usually don't need to mention Tool names. IMPORTANT: When searching for errors or logs, ALWAYS search across 'log.message', 'exception_message', and 'log.exception.exception_message' fields. Do not rely on a single field."),
-                        MessagesPlaceholder(variable_name="chat_history"),
-                        ("human", "{input}"),
-                        MessagesPlaceholder(variable_name="agent_scratchpad"),
-                    ])
+    #                 prompt = ChatPromptTemplate.from_messages([
+    #                     ("system", "You are a helpful Log Analysis Assistant. You have access to OpenSearch logs. You usually don't need to mention Tool names. IMPORTANT: When searching for errors or logs, ALWAYS search across 'log.message', 'exception_message', and 'log.exception.exception_message' fields. Do not rely on a single field."),
+    #                     MessagesPlaceholder(variable_name="chat_history"),
+    #                     ("human", "{input}"),
+    #                     MessagesPlaceholder(variable_name="agent_scratchpad"),
+    #                 ])
 
-                    agent = create_tool_calling_agent(
-                        llm=model,
-                        tools=tools,
-                        prompt=prompt
-                    )
+    #                 agent = create_tool_calling_agent(
+    #                     llm=model,
+    #                     tools=tools,
+    #                     prompt=prompt
+    #                 )
 
-                    agent_executor = AgentExecutor(
-                        agent=agent,
-                        tools=tools,
-                        verbose=True,
-                        memory=st.session_state.agent_memory,
-                        handle_parsing_errors=True,
-                        return_intermediate_steps=True
-                    )
+    #                 agent_executor = AgentExecutor(
+    #                     agent=agent,
+    #                     tools=tools,
+    #                     verbose=True,
+    #                     memory=st.session_state.agent_memory,
+    #                     handle_parsing_errors=True,
+    #                     return_intermediate_steps=True
+    #                 )
 
-                    # Create a placeholder for status updates
-                    status_placeholder = st.empty()
-                    status_placeholder.markdown("🧠 *Thinking...*")
-                    full_response = ""
-                    try:
-                        # Stream events
-                        async for event in agent_executor.astream_events({"input": user_input}, version="v1"):
-                            kind = event["event"]
-                            
-                            if kind == "on_tool_start":
-                                tool_input = event["data"].get("input")
-                                status_placeholder.markdown(f"🛠️ **Executing**: `{event['name']}`\nInput: `{tool_input}`")
-                            elif kind == "on_tool_end":
-                                 # Clear or update status, but don't print persistently
-                                 status_placeholder.markdown(f"✅ **Finished**: `{event['name']}`")
-                            elif kind == "on_chat_model_stream":
-                                content = event["data"]["chunk"].content
-                                if content:
-                                    full_response += content
-                                    yield content
-                    except GeneratorExit:
-                        # Streamlit interrupted the stream
-                        pass
-                    except Exception as e:
-                        # Log other errors
-                        pass
-                    
-                    status_placeholder.empty() # Clear status
-                    
-                    # Store result in session state for saving
-                    st.session_state.temp_last_response = full_response
-                
-                # Define a synchronous wrapper to drive the async generator
-                def sync_stream_wrapper(async_gen):
-                    while True:
-                        try:
-                            # Fetch next chunk from async generator using the loop
-                            chunk = loop.run_until_complete(async_gen.__anext__())
-                            yield chunk
-                        except StopAsyncIteration:
-                            break
-                        except Exception as e:
-                            st.error(f"Streaming error: {e}")
-                            break
+    #                 # Create a placeholder for status updates
+    #                 status_placeholder = st.empty()
+    #                 status_placeholder.markdown("🧠 *Thinking...*")
+    #                 full_response = ""
+    #                 try:
+    #                     # Stream events
+    #                     async for event in agent_executor.astream_events({"input": user_input}, version="v1"):
+    #                         kind = event["event"]
+    #                         
+    #                         if kind == "on_tool_start":
+    #                             tool_input = event["data"].get("input")
+    #                             status_placeholder.markdown(f"🛠️ **Executing**: `{event['name']}`\nInput: `{tool_input}`")
+    #                         elif kind == "on_tool_end":
+    #                              # Clear or update status, but don't print persistently
+    #                              status_placeholder.markdown(f"✅ **Finished**: `{event['name']}`")
+    #                         elif kind == "on_chat_model_stream":
+    #                             content = event["data"]["chunk"].content
+    #                             if content:
+    #                                 full_response += content
+    #                                 yield content
+    #                 except GeneratorExit:
+    #                     # Streamlit interrupted the stream
+    #                     pass
+    #                 except Exception as e:
+    #                     # Log other errors
+    #                     pass
+    #                 
+    #                 status_placeholder.empty() # Clear status
+    #                 
+    #                 # Store result in session state for saving
+    #                 st.session_state.temp_last_response = full_response
+    #             
+    #             # Define a synchronous wrapper to drive the async generator
+    #             def sync_stream_wrapper(async_gen):
+    #                 while True:
+    #                     try:
+    #                         # Fetch next chunk from async generator using the loop
+    #                         chunk = loop.run_until_complete(async_gen.__anext__())
+    #                         yield chunk
+    #                     except StopAsyncIteration:
+    #                         break
+    #                     except Exception as e:
+    #                         st.error(f"Streaming error: {e}")
+    #                         break
 
-                # Execute streaming using the wrapper
-                st.write_stream(sync_stream_wrapper(run_agent_async(prompt)))
-                
-                # Save history
-                final_res = st.session_state.get("temp_last_response")
-                if final_res:
-                    st.session_state.messages.append({"role": "assistant", "content": final_res})
-                    save_chat_history(st.session_state.messages)
-                    del st.session_state.temp_last_response
-                    
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
+    #             # Execute streaming using the wrapper
+    #             st.write_stream(sync_stream_wrapper(run_agent_async(prompt)))
+    #             
+    #             # Save history
+    #             final_res = st.session_state.get("temp_last_response")
+    #             if final_res:
+    #                 st.session_state.messages.append({"role": "assistant", "content": final_res})
+    #                 save_chat_history(st.session_state.messages)
+    #                 del st.session_state.temp_last_response
+    #                 
+    #         except Exception as e:
+    #             st.error(f"An error occurred: {e}")
 
 # --- PAGE 3: Upload Logs ---
 elif page == "Upload Logs":
