@@ -7,8 +7,8 @@ import asyncio
 import nest_asyncio
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
-from langchain.agents.output_parsers.openai_tools import OpenAIToolsAgentOutputParser
-from langchain.agents.format_scratchpad.openai_tools import format_to_openai_tool_messages
+from langchain.agents.openai_tools import OpenAIToolsAgentOutputParser
+from langchain.agents.openai_tools import format_to_openai_tool_messages
 from langchain.agents.agent import AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
@@ -356,6 +356,17 @@ def local_css():
             border-radius: 8px;
             overflow: hidden;
         }
+
+        /* Logout Button Red Styling */
+        div[data-testid="stSidebar"] button[kind="primary"] {
+            background-color: #FF4B4B;
+            color: white;
+            border: none;
+        }
+        div[data-testid="stSidebar"] button[kind="primary"]:hover {
+            background-color: #FF0000;
+            color: white;
+        }
         
         </style>
     """, unsafe_allow_html=True)
@@ -452,6 +463,11 @@ if st.sidebar.button("Chat Agent", width="stretch"):
 
 if st.sidebar.button("Upload Logs", width="stretch"):
     st.session_state.active_page = "Upload Logs"
+    st.rerun()
+
+st.sidebar.markdown("---")
+if st.sidebar.button("Logout", type="primary", use_container_width=True):
+    st.session_state.logged_in = False
     st.rerun()
 
 page = st.session_state.active_page
