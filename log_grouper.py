@@ -71,6 +71,14 @@ def extract_csp_signature(message):
     effective_match = re.search(effective_pattern, message)
     
     blocked = blocked_match.group(1).strip() if blocked_match else "Unknown"
+    
+    # Truncate URL to origin (scheme + domain) to group effectively
+    # e.g. https://fonts.gstatic.com/s/foo -> https://fonts.gstatic.com
+    if "://" in blocked:
+        parts = blocked.split('/')
+        if len(parts) >= 3:
+            blocked = "/".join(parts[:3])
+
     violated = violated_match.group(1).strip() if violated_match else "Unknown"
     effective = effective_match.group(1).strip() if effective_match else "Unknown"
     
