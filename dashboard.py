@@ -815,142 +815,212 @@ elif page == "Grouping Studio":
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.output_parsers import StrOutputParser
     
-    # 1. Search Interface
-    st.subheader("1. Find Similar Logs")
-    search_query = st.text_input("Search Pega Logs (Message / Exception)", placeholder="e.g. TimeoutException")
+    st.subheader("1. Find Similar Groups")
+    search_query = st.text_input("Search Logs / Groups", placeholder="Filter by Message, Exception or Rule...")
     
-    if search_query:
-        if client:
-            # Flexible match query
-            s_query = {
-                "size": 20,
-                "query": {
-                    "bool": {
-                        "should": [
-                            {"match": {"log.message": search_query}},
-                            {"match": {"exception_message": search_query}},
-                            {"match": {"normalized_message": search_query}}
-                        ],
-                        "minimum_should_match": 1
-                    }
-                }
-            }
-            res = client.search(index="pega-logs", body=s_query)
-            hits = res['hits']['hits']
-            
-            if hits:
-                # Prepare data for selection - Add "Select" column
-                selection_data = []
-                for hit in hits:
-                    src = hit['_source']
-                    selection_data.append({
-                        "Select": False,
-                        "_id": hit['_id'],
-                        "Time": src.get("ingestion_timestamp"),
-                        "Message": src.get("log", {}).get("message", "")[:200], # Truncate for UI
-                        "Normalized Message": src.get("normalized_message", ""),
-                        "Normalized Exception": src.get("normalized_exception_message", "")
-                    })
-                
-                df_hits = pd.DataFrame(selection_data)
-                
-                # Editable Table
-                edited_df = st.data_editor(
-                    df_hits,
-                    column_config={
-                        "Select": st.column_config.CheckboxColumn(required=True),
-                        "_id": None, # Hide ID
-                        "Time": st.column_config.DatetimeColumn(format="D MMM HH:mm:ss"),
-                        "Message": st.column_config.TextColumn("Log Message", width="large"),
-                        "Normalized Message": None, # Hide detail columns
-                        "Normalized Exception": None
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                    key="selector_table"
-                )
-                
-                # Get Selected Rows
-                selected_rows = edited_df[edited_df["Select"]]
-                
-                if not selected_rows.empty:
-                    st.divider()
-                    st.subheader("2. Analyze Pattern")
-                    
-                    # Prepare Safe Payload
-                    examples = []
-                    for index, row in selected_rows.iterrows():
-                        # PREFER Exception if available, else Message
-                        if row["Normalized Exception"]:
-                            examples.append(row["Normalized Exception"])
-                        else:
-                            examples.append(row["Normalized Message"])
-                    
-                    st.write("Selected Candidates (Normalized):")
-                    st.code(json.dumps(examples, indent=2), language="json")
-                    
-                    if st.button("✨ Generate Regex Pattern"):
-                        with st.spinner("Asking LLM to extract pattern..."):
-                            try:
-                                llm = ChatOpenAI(model="gpt-4o", temperature=0)
-                                prompt = ChatPromptTemplate.from_template(
-                                    """
-                                    You are a Regex Expert.
-                                    Analyze these {count} log error strings.
-                                    Goal: Create a SINGLE Python Regex that matches ALL of them.
-                                    
-                                    Rules:
-                                    1. Use `.*` or `[\d]+` for variable parts.
-                                    2. Keep static parts exact to ensure high precision.
-                                    3. Return ONLY the Regex string. No markdown, no explanations.
-                                    
-                                    Examples:
-                                    {examples}
-                                    """
-                                )
-                                chain = prompt | llm | StrOutputParser()
-                                pattern = chain.invoke({"count": len(examples), "examples": "\n".join(examples)})
-                                
-                                st.session_state.generated_pattern = pattern
-                                st.success("Pattern Generated!")
-                            except Exception as e:
-                                st.error(f"LLM Error: {e}")
+    if client:
+        # Fetch detailed data (Same as Dashboard Page)
+        df_details = fetch_detailed_table_data(client, size=1000)
+        
+        if not df_details.empty:
+            # Add Select Column
+            df_details.insert(0, "Select", False)
 
-                    # 3. Save Section
-                    if "generated_pattern" in st.session_state:
-                         st.divider()
-                         st.subheader("3. Save Rule")
-                         
-                         pat = st.text_input("Regex Pattern", value=st.session_state.generated_pattern)
-                         c1, c2 = st.columns(2)
-                         rule_name = c1.text_input("Rule Name", placeholder="e.g. Activity Timeouts")
-                         group_type = c2.text_input("Group Category", value="Custom", placeholder="e.g. CSP, Infrastructure")
-                         
-                         if st.button("Save to Custom Patterns"):
-                             if rule_name and pat:
-                                 # Load existing
-                                 existing = []
-                                 if os.path.exists("custom_patterns.json"):
-                                     with open("custom_patterns.json", "r") as f:
-                                         try:
-                                             existing = json.load(f)
-                                         except: pass
-                                 
-                                 # Append
+            # Client-side Filtering based on Search Query
+            if search_query:
+                # Case-insensitive string search across relevant columns
+                mask = (
+                    df_details['display_rule'].astype(str).str.contains(search_query, case=False, na=False) |
+                    df_details['exception_summary'].astype(str).str.contains(search_query, case=False, na=False) |
+                    df_details['message_summary'].astype(str).str.contains(search_query, case=False, na=False) |
+                    df_details['group_type'].astype(str).str.contains(search_query, case=False, na=False)
+                )
+                filtered_df = df_details[mask]
+            else:
+                filtered_df = df_details
+
+            # Ensure Status options are present for the Selectbox config (reuse logic)
+            standard_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "COMPLETED"]
+            existing_statuses = df_details['diagnosis.status'].dropna().unique().tolist()
+            all_options = list(dict.fromkeys(standard_options + existing_statuses))
+
+            # Render Table exactly like Dashboard but with Select column
+            edited_df = st.data_editor(
+                filtered_df,
+                width="stretch",
+                column_config={
+                    "Select": st.column_config.CheckboxColumn(required=True),
+                    "doc_id": None, 
+                    "last_seen": st.column_config.DatetimeColumn("Last Seen", format="D MMM YYYY, h:mm a"),
+                    "count": st.column_config.ProgressColumn("Count", format="%d", min_value=0, max_value=int(df_details['count'].max())),
+                    "diagnosis.status": st.column_config.SelectboxColumn("Status", options=all_options, required=True),
+                    "group_signature": st.column_config.TextColumn("Full Signature", width="small", help="Unique signature defining this group"),
+                    "group_type": "Type",
+                    "display_rule": "Rule Name",
+                    "exception_summary": "Exception Info",
+                    "message_summary": "Log Message",
+                    "logger_name": "Logger",
+                    "diagnosis.report": "Report"
+                },
+                disabled=["last_seen", "group_signature", "group_type", "count", "display_rule", 
+                          "exception_summary", "message_summary", "logger_name", "diagnosis.report"],
+                hide_index=True,
+                key="grouping_selector_table"
+            )
+
+            # Get Selected Rows
+            selected_rows = edited_df[edited_df["Select"]]
+            
+            if not selected_rows.empty:
+                st.divider()
+                st.subheader("2. Analyze Pattern")
+                
+                # Prepare Safe Payload
+                examples = []
+                for index, row in selected_rows.iterrows():
+                    # For Analysis Results, we prefer Exception Summary or full Signature
+                    sig = row.get("group_signature")
+                    exc = row.get("exception_summary")
+                    msg = row.get("message_summary")
+                    
+                    # Heuristic: Send the most descriptive text
+                    if exc and exc != "N/A":
+                        examples.append(exc)
+                    elif msg and msg != "N/A":
+                        examples.append(msg)
+                    else:
+                        examples.append(sig)
+                    
+                st.write("Selected Candidates (Normalized):")
+                st.code(json.dumps(examples, indent=2), language="json")
+                
+                if st.button("✨ Generate Regex Pattern", key="generate_regex_btn"):
+                    with st.spinner("Analyzing patterns & checking existing rules..."):
+                        try:
+                            # 1. Load Existing Rules to provide context
+                            existing_rules_str = "[]"
+                            if os.path.exists("custom_patterns.json"):
+                                try:
+                                    with open("custom_patterns.json", "r") as f:
+                                        existing_data = json.load(f)
+                                        # Send simplified version to save tokens
+                                        simple_rules = [{"name": r["name"], "pattern": r["pattern"], "group_type": r.get("group_type", "Custom")} for r in existing_data]
+                                        existing_rules_str = json.dumps(simple_rules, indent=2)
+                                except: pass
+
+                            llm = ChatOpenAI(model="gpt-4o", temperature=0)
+                            
+                            prompt = ChatPromptTemplate.from_template(
+                                """
+                                You are a Regex Expert and Log Analyst.
+                                
+                                **Task**: 
+                                Analyze these {count} NEW log error strings against the EXISTING rules.
+                                
+                                **Existing Rules**:
+                                {existing_rules}
+                                
+                                **New Log Examples**:
+                                {examples}
+                                
+                                **Goal**:
+                                Determine if the new logs belong to an EXISTING rule (but the regex was too strict) or if this is a completely NEW issue.
+                                
+                                **Output format**:
+                                Return strictly Valid JSON:
+                                {{
+                                    "action": "UPDATE" or "NEW",
+                                    "rule_name": "Name of the existing rule OR a descriptive new name",
+                                    "group_type": "The existing group category OR a new category",
+                                    "regex_pattern": "The UPDATED python regex (matching old + new) OR a completely NEW regex"
+                                }}
+                                
+                                **Rules**:
+                                1. If modifying an existing regex, ensure it still matches the original intent but is broad enough for the new logs.
+                                2. Use `.*` or `[\d]+` for variable parts.
+                                3. Keep static parts exact.
+                                """
+                            )
+                            chain = prompt | llm | StrOutputParser()
+                            result_str = chain.invoke({
+                                "count": len(examples), 
+                                "examples": "\n".join(examples),
+                                "existing_rules": existing_rules_str
+                            })
+                            
+                            # Clean and Parse JSON
+                            cleaned_json = result_str.replace("```json", "").replace("```", "").strip()
+                            result = json.loads(cleaned_json)
+                            
+                            # Update Session State
+                            st.session_state.generated_pattern = result.get("regex_pattern", "")
+                            st.session_state.suggested_name = result.get("rule_name", "")
+                            st.session_state.suggested_type = result.get("group_type", "Custom")
+                            
+                            if result.get("action") == "UPDATE":
+                                st.info(f"💡 Merging with existing rule: **{result.get('rule_name')}**")
+                            else:
+                                st.success("✨ New Pattern Generated!")
+                                
+                        except Exception as e:
+                            st.error(f"LLM Error: {e}")
+
+                # 3. Save Section
+                if "generated_pattern" in st.session_state:
+                     st.divider()
+                     st.subheader("3. Save Rule")
+                     
+                     # Use defaults if available
+                     pat_val = st.session_state.generated_pattern
+                     name_val = st.session_state.get("suggested_name", "")
+                     type_val = st.session_state.get("suggested_type", "Custom")
+                     
+                     pat = st.text_input("Regex Pattern", value=pat_val)
+                     c1, c2 = st.columns(2)
+                     rule_name = c1.text_input("Rule Name", value=name_val, placeholder="e.g. Activity Timeouts")
+                     group_type = c2.text_input("Group Category", value=type_val, placeholder="e.g. CSP, Infrastructure")
+                     
+                     if st.button("Save to Custom Patterns"):
+                         if rule_name and pat:
+                             # Load existing
+                             existing = []
+                             if os.path.exists("custom_patterns.json"):
+                                 with open("custom_patterns.json", "r") as f:
+                                     try:
+                                         existing = json.load(f)
+                                     except: pass
+                             
+                             # Check for overwrite using Rule Name
+                             updated = False
+                             for i, rule in enumerate(existing):
+                                 if rule["name"] == rule_name:
+                                     existing[i]["pattern"] = pat
+                                     existing[i]["group_type"] = group_type
+                                     updated = True
+                                     break
+                            
+                             if not updated:
                                  new_rule = {
                                      "name": rule_name,
                                      "pattern": pat,
                                      "group_type": group_type if group_type else "Custom"
                                  }
                                  existing.append(new_rule)
+                             
+                             with open("custom_patterns.json", "w") as f:
+                                 json.dump(existing, f, indent=2)
                                  
-                                 with open("custom_patterns.json", "w") as f:
-                                     json.dump(existing, f, indent=2)
-                                     
-                                 st.success(f"Rule '{rule_name}' saved! It will be applied on next ingestion run.")
-                                 del st.session_state.generated_pattern # Reset
+                             if updated:
+                                 st.info(f"Updated existing rule '{rule_name}' with new pattern!")
                              else:
-                                 st.warning("Please provide both Rule Name and Pattern.")
+                                 st.success(f"Created new rule '{rule_name}'!")
+                                 
+                             # Cleanup session
+                             if "generated_pattern" in st.session_state: del st.session_state.generated_pattern
+                             if "suggested_name" in st.session_state: del st.session_state.suggested_name
+                             if "suggested_type" in st.session_state: del st.session_state.suggested_type
+                         else:
+                             st.warning("Please provide both Rule Name and Pattern.")
             
             # 4. Automation: Run Grouper
             st.divider()

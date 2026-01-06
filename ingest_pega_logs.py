@@ -281,6 +281,17 @@ def ingest_single_file(file_path: str):
                     # Attempt to parse as JSON
                     log_entry = json.loads(line)
                     
+                    # Extract Timestamp from Log
+                    # Priority: @timestamp (Pega standard) -> log.timestamp -> fallback to current ingestion time
+                    extracted_ts = log_entry.get("@timestamp") or log_entry.get("log", {}).get("timestamp")
+                    if extracted_ts:
+                         # Use the log's own timestamp
+                         ingestion_ts = extracted_ts
+                    else:
+                         # Fallback to current time if missing
+                         ingestion_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+                    
                     # 1. Extract and Parse Stack Trace
                     stack_trace = extract_stacktrace_from_log_entry(log_entry)
                     sequence_summary = {}
