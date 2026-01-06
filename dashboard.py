@@ -467,6 +467,11 @@ if st.sidebar.button("Upload Logs", width="stretch"):
     st.session_state.active_page = "Upload Logs"
     st.rerun()
 
+if st.sidebar.button("Grouping Studio", width="stretch"):
+    st.session_state.active_page = "Grouping Studio"
+    st.rerun()
+
+
 st.sidebar.markdown("---")
 if st.sidebar.button("Logout", type="primary", width="stretch"):
     st.session_state.logged_in = False
@@ -797,6 +802,144 @@ elif page == "Upload Logs":
                         st.balloons()
                     else:
                         st.error(f"Ingestion failed: {result.get('message')}")
-                        
                 except Exception as e:
                     st.error(f"Error during ingestion: {str(e)}")
+                        
+# --- PAGE 4: Grouping Studio ---
+elif page == "Grouping Studio":
+    st.header("🎨 Grouping Studio")
+    st.info("Define custom grouping patterns based on examples.")
+    
+    # Imports for LLM
+    from langchain_openai import ChatOpenAI
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import StrOutputParser
+    
+    # 1. Search Interface
+    st.subheader("1. Find Similar Logs")
+    search_query = st.text_input("Search Pega Logs (Message / Exception)", placeholder="e.g. TimeoutException")
+    
+    if search_query:
+        if client:
+            # Flexible match query
+            s_query = {
+                "size": 20,
+                "query": {
+                    "bool": {
+                        "should": [
+                            {"match": {"log.message": search_query}},
+                            {"match": {"exception_message": search_query}},
+                            {"match": {"normalized_message": search_query}}
+                        ],
+                        "minimum_should_match": 1
+                    }
+                }
+            }
+            res = client.search(index="pega-logs", body=s_query)
+            hits = res['hits']['hits']
+            
+            if hits:
+                # Prepare data for selection
+                selection_data = []
+                for hit in hits:
+                    src = hit['_source']
+                    # We ONLY use normalized fields for safety display if possible, 
+                    # but user needs context. We will display raw but send normalized to LLM.
+                    selection_data.append({
+                        "_id": hit['_id'],
+                        "Time": src.get("ingestion_timestamp"),
+                        "Message": src.get("log", {}).get("message", "")[:200], # Truncate for UI
+                        "Normalized Message": src.get("normalized_message", ""),
+                        "Normalized Exception": src.get("normalized_exception_message", "")
+                    })
+                
+                df_hits = pd.DataFrame(selection_data)
+                
+                # Checkbox selection
+                selected_indices = st.multiselect(
+                    "Select logs to analyze:", 
+                    options=df_hits.index, 
+                    format_func=lambda i: f"{df_hits.iloc[i]['Time']} | {df_hits.iloc[i]['Message']}"
+                )
+                
+                if selected_indices:
+                    st.divider()
+                    st.subheader("2. Analyze Pattern")
+                    
+                    # Prepare Safe Payload
+                    examples = []
+                    for i in selected_indices:
+                        row = df_hits.iloc[i]
+                        # PREFER Exception if available, else Message
+                        if row["Normalized Exception"]:
+                            examples.append(row["Normalized Exception"])
+                        else:
+                            examples.append(row["Normalized Message"])
+                    
+                    st.write("Selected Candidates (Normalized):")
+                    st.code(json.dumps(examples, indent=2), language="json")
+                    
+                    if st.button("✨ Generate Regex Pattern"):
+                        with st.spinner("Asking LLM to extract pattern..."):
+                            try:
+                                llm = ChatOpenAI(model="gpt-4o", temperature=0)
+                                prompt = ChatPromptTemplate.from_template(
+                                    """
+                                    You are a Regex Expert.
+                                    Analyze these {count} log error strings.
+                                    Goal: Create a SINGLE Python Regex that matches ALL of them.
+                                    
+                                    Rules:
+                                    1. Use `.*` or `[\d]+` for variable parts.
+                                    2. Keep static parts exact to ensure high precision.
+                                    3. Return ONLY the Regex string. No markdown, no explanations.
+                                    
+                                    Examples:
+                                    {examples}
+                                    """
+                                )
+                                chain = prompt | llm | StrOutputParser()
+                                pattern = chain.invoke({"count": len(examples), "examples": "\n".join(examples)})
+                                
+                                st.session_state.generated_pattern = pattern
+                                st.success("Pattern Generated!")
+                            except Exception as e:
+                                st.error(f"LLM Error: {e}")
+
+                    # 3. Save Section
+                    if "generated_pattern" in st.session_state:
+                         st.divider()
+                         st.subheader("3. Save Rule")
+                         
+                         pat = st.text_input("Regex Pattern", value=st.session_state.generated_pattern)
+                         rule_name = st.text_input("Rule Name", placeholder="e.g. Activity Timeouts")
+                         
+                         if st.button("Save to Custom Patterns"):
+                             if rule_name and pat:
+                                 # Load existing
+                                 existing = []
+                                 if os.path.exists("custom_patterns.json"):
+                                     with open("custom_patterns.json", "r") as f:
+                                         try:
+                                             existing = json.load(f)
+                                         except: pass
+                                 
+                                 # Append
+                                 new_rule = {
+                                     "name": rule_name,
+                                     "pattern": pat,
+                                     "group_type": "Custom"
+                                 }
+                                 existing.append(new_rule)
+                                 
+                                 with open("custom_patterns.json", "w") as f:
+                                     json.dump(existing, f, indent=2)
+                                     
+                                 st.success(f"Rule '{rule_name}' saved! It will be applied on next ingestion run.")
+                                 del st.session_state.generated_pattern # Reset
+                             else:
+                                 st.warning("Please provide both Rule Name and Pattern.")
+            else:
+                st.warning("No logs found matching query.")
+                        
+

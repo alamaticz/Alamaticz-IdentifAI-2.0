@@ -28,6 +28,28 @@ OPENSEARCH_USER = os.getenv("OPENSEARCH_USER")
 OPENSEARCH_PASS = os.getenv("OPENSEARCH_PASS")
 SOURCE_INDEX = "pega-logs"
 DEST_INDEX = "pega-analysis-results"
+CUSTOM_PATTERNS_FILE = "custom_patterns.json"
+
+def load_custom_patterns():
+    """Load custom regex patterns from JSON file."""
+    if not os.path.exists(CUSTOM_PATTERNS_FILE):
+        return []
+    try:
+        with open(CUSTOM_PATTERNS_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[WARN] Failed to load custom patterns: {e}")
+        return []
+
+def check_custom_patterns(message, patterns):
+    """Check if message matches any custom pattern."""
+    for p in patterns:
+        try:
+            if re.search(p['pattern'], message, re.IGNORECASE):
+                return p
+        except:
+            continue
+    return None
 
 def get_opensearch_client():
     """Create and return OpenSearch client with robust retry logic."""
@@ -184,6 +206,13 @@ def process_logs(limit=None, batch_size=100):
     else:
         print("[INFO] No checkpoint found. Processing ALL logs.")
 
+    # Load Custom Patterns
+    custom_patterns = load_custom_patterns()
+    if custom_patterns:
+        print(f"[INFO] Loaded {len(custom_patterns)} custom grouping rules.")
+
+    # Query: Fetch only ERROR logs
+
     # Query: Fetch only ERROR logs
     query = {
         "query": {
@@ -258,11 +287,19 @@ def process_logs(limit=None, batch_size=100):
         group_type = "Unanalyzed"
         group_signature_string = ""
         
+        # Check for Custom Patterns First (Priority)
+        custom_match = check_custom_patterns(raw_message, custom_patterns)
+        
         # Check for CSP Violation first (Specific Raw Message Check)
         csp_signature = extract_csp_signature(raw_message)
 
+        # Scenario 0: Custom Rule
+        if custom_match:
+            group_type = f"Custom: {custom_match['name']}"
+            group_signature_string = custom_match['name']
+        
         # Scenario 1: CSP Violation
-        if csp_signature:
+        elif csp_signature:
              group_type = "CSP Violation"
              group_signature_string = csp_signature
 
@@ -312,7 +349,10 @@ def process_logs(limit=None, batch_size=100):
 
             // Increment counters
             ctx._source.count += params.inc;
-            ctx._source.last_seen = params.last_seen;
+            // Update last_seen only if the new log is more recent (or if field is missing)
+            if (ctx._source.last_seen == null || params.last_seen.compareTo(ctx._source.last_seen) > 0) {
+                ctx._source.last_seen = params.last_seen;
+            }
 
             // Add raw log ID (cap at 50)
             if (ctx._source.raw_log_ids.size() < 50 && !ctx._source.raw_log_ids.contains(params.new_id)) {
@@ -341,8 +381,8 @@ def process_logs(limit=None, batch_size=100):
         upsert_doc = {
             "group_signature": group_signature_string,
             "group_type": group_type,
-            "first_seen": now_ts,
-            "last_seen": now_ts,
+            "first_seen": doc_ts if doc_ts else now_ts,
+            "last_seen": doc_ts if doc_ts else now_ts,
             "count": 1,
             "raw_log_ids": [doc_id],
             "exception_signatures": [norm_exc_message] if norm_exc_message else [],
@@ -365,7 +405,7 @@ def process_logs(limit=None, batch_size=100):
                 "lang": "painless",
                 "params": {
                     "inc": 1,
-                    "last_seen": now_ts,
+                    "last_seen": doc_ts if doc_ts else now_ts,
                     "new_id": doc_id,
                     "rep_log": rep_log,
                     "norm_exc": norm_exc_message,
