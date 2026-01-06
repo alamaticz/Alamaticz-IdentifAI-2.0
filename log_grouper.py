@@ -295,7 +295,15 @@ def process_logs(limit=None, batch_size=100):
 
         # Scenario 0: Custom Rule
         if custom_match:
-            group_type = f"Custom: {custom_match['name']}"
+            # Use user-defined Group Category (e.g. "CSP", "Infrastructure") or default to "Custom"
+            raw_type = custom_match.get('group_type', 'Custom')
+            # If user explicitly set "Custom", keep formatting "Custom: Name". 
+            # If they set "CSP" or "Infrastructure", use that directly as the category.
+            if raw_type == "Custom":
+                group_type = f"Custom: {custom_match['name']}"
+            else:
+                group_type = raw_type
+                
             group_signature_string = custom_match['name']
         
         # Scenario 1: CSP Violation

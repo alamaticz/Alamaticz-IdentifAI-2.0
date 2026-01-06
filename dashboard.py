@@ -839,13 +839,12 @@ elif page == "Grouping Studio":
             hits = res['hits']['hits']
             
             if hits:
-                # Prepare data for selection
+                # Prepare data for selection - Add "Select" column
                 selection_data = []
                 for hit in hits:
                     src = hit['_source']
-                    # We ONLY use normalized fields for safety display if possible, 
-                    # but user needs context. We will display raw but send normalized to LLM.
                     selection_data.append({
+                        "Select": False,
                         "_id": hit['_id'],
                         "Time": src.get("ingestion_timestamp"),
                         "Message": src.get("log", {}).get("message", "")[:200], # Truncate for UI
@@ -855,21 +854,32 @@ elif page == "Grouping Studio":
                 
                 df_hits = pd.DataFrame(selection_data)
                 
-                # Checkbox selection
-                selected_indices = st.multiselect(
-                    "Select logs to analyze:", 
-                    options=df_hits.index, 
-                    format_func=lambda i: f"{df_hits.iloc[i]['Time']} | {df_hits.iloc[i]['Message']}"
+                # Editable Table
+                edited_df = st.data_editor(
+                    df_hits,
+                    column_config={
+                        "Select": st.column_config.CheckboxColumn(required=True),
+                        "_id": None, # Hide ID
+                        "Time": st.column_config.DatetimeColumn(format="D MMM HH:mm:ss"),
+                        "Message": st.column_config.TextColumn("Log Message", width="large"),
+                        "Normalized Message": None, # Hide detail columns
+                        "Normalized Exception": None
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    key="selector_table"
                 )
                 
-                if selected_indices:
+                # Get Selected Rows
+                selected_rows = edited_df[edited_df["Select"]]
+                
+                if not selected_rows.empty:
                     st.divider()
                     st.subheader("2. Analyze Pattern")
                     
                     # Prepare Safe Payload
                     examples = []
-                    for i in selected_indices:
-                        row = df_hits.iloc[i]
+                    for index, row in selected_rows.iterrows():
                         # PREFER Exception if available, else Message
                         if row["Normalized Exception"]:
                             examples.append(row["Normalized Exception"])
@@ -912,7 +922,9 @@ elif page == "Grouping Studio":
                          st.subheader("3. Save Rule")
                          
                          pat = st.text_input("Regex Pattern", value=st.session_state.generated_pattern)
-                         rule_name = st.text_input("Rule Name", placeholder="e.g. Activity Timeouts")
+                         c1, c2 = st.columns(2)
+                         rule_name = c1.text_input("Rule Name", placeholder="e.g. Activity Timeouts")
+                         group_type = c2.text_input("Group Category", value="Custom", placeholder="e.g. CSP, Infrastructure")
                          
                          if st.button("Save to Custom Patterns"):
                              if rule_name and pat:
@@ -928,7 +940,7 @@ elif page == "Grouping Studio":
                                  new_rule = {
                                      "name": rule_name,
                                      "pattern": pat,
-                                     "group_type": "Custom"
+                                     "group_type": group_type if group_type else "Custom"
                                  }
                                  existing.append(new_rule)
                                  
@@ -939,6 +951,37 @@ elif page == "Grouping Studio":
                                  del st.session_state.generated_pattern # Reset
                              else:
                                  st.warning("Please provide both Rule Name and Pattern.")
+            
+            # 4. Automation: Run Grouper
+            st.divider()
+            st.subheader("4. Apply Changes")
+            st.markdown("Run the grouping logic now to apply your new rules to existing logs.")
+            
+            if st.button("🚀 Apply Rules Now (Run Grouper)", type="primary"):
+                with st.spinner("Running Grouping Logic... This may take a minute."):
+                    try:
+                        import subprocess
+                        # Run the script and capture output
+                        result = subprocess.run(
+                            ["python", "log_grouper.py"], 
+                            capture_output=True, 
+                            text=True, 
+                            cwd=os.getcwd()
+                        )
+                        
+                        if result.returncode == 0:
+                            st.success("Grouping Completed Successfully!")
+                            with st.expander("View Output Logs"):
+                                st.code(result.stdout)
+                        else:
+                            st.error("Grouping Failed.")
+                            with st.expander("View Error Logs"):
+                                st.code(result.stderr)
+                                st.code(result.stdout)
+                                
+                    except Exception as e:
+                        st.error(f"Failed to execute script: {str(e)}")
+
             else:
                 st.warning("No logs found matching query.")
                         
