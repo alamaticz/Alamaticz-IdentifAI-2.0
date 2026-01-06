@@ -58,7 +58,7 @@ def login_page():
     _, col2, _ = st.columns([1, 1, 1])
     with col2:
         if os.path.exists("assets/logo.jpg"):
-            st.image("assets/logo.jpg", use_container_width=True)
+            st.image("assets/logo.jpg", width="stretch")
         else:
             st.header("IdentifAI 2.0")
         
@@ -67,7 +67,7 @@ def login_page():
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         
-        if st.button("Login", type="primary", use_container_width=True):
+        if st.button("Login", type="primary", width="stretch"):
             if username == "alamaticz" and password == "Alamaticz#2024":
                 st.session_state.logged_in = True
                 st.rerun()
@@ -468,7 +468,7 @@ if st.sidebar.button("Upload Logs", width="stretch"):
     st.rerun()
 
 st.sidebar.markdown("---")
-if st.sidebar.button("Logout", type="primary", use_container_width=True):
+if st.sidebar.button("Logout", type="primary", width="stretch"):
     st.session_state.logged_in = False
     st.rerun()
 
@@ -522,7 +522,7 @@ if page == "Dashboard":
             # Table with editing
             edited_df = st.data_editor(
                 filtered_df, 
-                use_container_width=True,
+                width="stretch",
                 column_config={
                     "doc_id": None, 
                     "last_seen": st.column_config.DatetimeColumn("Last Seen", format="D MMM YYYY, h:mm a"),
