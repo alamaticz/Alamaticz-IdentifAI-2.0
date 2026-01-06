@@ -9,12 +9,15 @@ The primary Python script for local ingestion.
 
 *   **Purpose**: Reads a text/log file line-by-line, parses Pega's JSON format (or raw text), and bulk indexes it into OpenSearch.
 *   **Key Features**:
+    *   **ZIP Support**: Automatically detects and extracts `.zip` archives, processing all contained log files.
     *   **Idempotency**: Generates a deterministic `_id` (MD5 hash of the log content) for each document to prevent duplicate entries if the script is run multiple times.
     *   **Progress Tracking**: Uses `tqdm` to show a progress bar in the terminal.
     *   **Chunking**: Sends logs in batches (`BULK_CHUNK_SIZE`) to optimize network usage.
 *   **Usage**:
     ```bash
-    python ingest_pega_logs.py <filename>
+    python ingest_pega_logs.py <filename_or_zip>
+    # Example
+    python ingest_pega_logs.py logs.zip
     ```
 
 ### 2. `ingest_logs.bat`

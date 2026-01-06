@@ -4,6 +4,11 @@ The Dashboard is the user interface for the entire system, built with **Streamli
 
 ## Script: `dashboard.py`
 
+### Authentication
+*   **Login Page**: The application is protected by a login screen.
+*   **Credentials**: Default `alamaticz` / `Alamaticz#2024`.
+*   **Logout**: A red "Logout" button is available in the sidebar to end the session.
+
 ### Pages and Navigation
 1.  **Dashboard (Main)**
     *   **Metrics**: Total Errors, Unique Issues, Top Rule Failure, Recent Ingestion.
@@ -12,16 +17,18 @@ The Dashboard is the user interface for the entire system, built with **Streamli
         *   Diagnosis Status (Pie Chart).
         *   Top Error Groups (Horizontal Bar Chart).
         *   Error Trend Over Time (Area Chart).
-    *   **Data Table**: Detailed view of error groups with "Expander" for full stack traces.
+    *   **Data Table**: Detailed view of error groups.
+        *   **Columns**: Includes "Last Seen" timestamp, "Diagnosis Status" (Editable), "Count" (Progress Bar), and signatures.
+        *   **Interactive**: Users can change the status (e.g., PENDING -> RESOLVED) directly in the table.
 
-2.  **Chat Agent**
+    *   **Status**: 🚧 **Work in Progress / Under Maintenance**
     *   **Purpose**: Natural language interface to the log data.
-    *   **Engine**: LangChain Agent with `AgentType.OPENAI_FUNCTIONS`.
-    *   **Streaming**: Implements a custom async event loop to provide real-time token streaming and tool execution logs to the UI.
-    *   **Memory**: Persists chat history to `chat_history.json` so conversations survive page refreshes.
+    *   **Engine**: LangChain Agent (Currently disabled/commented out in UI for refactoring).
+    *   **Memory**: Persists chat history to `chat_history.json`.
 
 3.  **Upload Logs**
-    *   Allows users to manually upload small log files via the browser (for quick checks without using the terminal).
+    *   **Purpose**: Web-based upload for smaller log files (supports `.log`, `.json`, `.txt`).
+    *   **Features**: Invokes the ingestion logic internally, creating unique session IDs for tracked uploads.
 
 ## Key Components
 

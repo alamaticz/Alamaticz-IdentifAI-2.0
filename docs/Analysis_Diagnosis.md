@@ -42,5 +42,5 @@ This script operates as a background worker. It does not ingest logs; it consume
 *   **OpenSearch**: Reads PENDING groups, writes COMPLETED diagnoses.
 
 ## Concurrency
-*   The script processes groups sequentially by default to avoid rate limits.
-*   Future enhancements may add `asyncio` for parallel processing of multiple groups.
+*   **Sequential execution**: Currently, the script processes groups sequentially to ensure stability and avoid rate limits.
+*   **Asyncio**: The underlying architecture uses `asyncio`, allowing for easy scaling to parallel processing in future updates.
