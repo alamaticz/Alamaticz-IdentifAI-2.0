@@ -27,6 +27,7 @@ INDEX_NAME = os.getenv("INDEX_NAME", "pega-logs")
 # Tunable settings
 CHUNK_SIZE = int(os.getenv("BULK_CHUNK_SIZE", "2500")) # Increased for throughput
 CLIENT_TIMEOUT = int(os.getenv("OPENSEARCH_TIMEOUT", "120"))
+THREAD_COUNT = int(os.getenv("INGESTION_THREADS", "8"))
 CLIENT_TIMEOUT = int(os.getenv("OPENSEARCH_TIMEOUT", "120"))
 
 def get_opensearch_client():
@@ -42,8 +43,9 @@ def get_opensearch_client():
         verify_certs=False,
         ssl_show_warn=False,
         timeout=CLIENT_TIMEOUT,
-        max_retries=3,
+        max_retries=5,
         retry_on_timeout=True,
+        retry_on_status=(429, 500, 502, 503, 504),
     )
 
 # --- Optimization Helpers ---
@@ -428,8 +430,8 @@ def ingest_single_file(file_path: str):
             for success, info in helpers.parallel_bulk(
                 client,
                 iterator,
-                thread_count=4,  # Use 4 threads
-                queue_size=8,
+                thread_count=THREAD_COUNT,
+                queue_size=THREAD_COUNT * 2,
                 chunk_size=CHUNK_SIZE,
                 raise_on_error=False,
                 raise_on_exception=False,
@@ -445,8 +447,9 @@ def ingest_single_file(file_path: str):
                     if status_code == 409:
                         duplicates += 1
                     else:
-                        if not use_tqdm:
-                             print(f"Failed doc: {info}")
+                        # Log sample errors even with tqdm
+                        if failure < 5:
+                             print(f"\n[ERROR] Failed doc (Status {status_code}): {info}")
                         failure += 1
                 
                 # Periodic print if no tqdm
