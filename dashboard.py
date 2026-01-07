@@ -915,10 +915,10 @@ elif page == "Grouping Studio":
             if search_query:
                 # Case-insensitive string search across relevant columns
                 mask = (
-                    df_details['display_rule'].astype(str).str.contains(search_query, case=False, na=False) |
-                    df_details['exception_summary'].astype(str).str.contains(search_query, case=False, na=False) |
-                    df_details['message_summary'].astype(str).str.contains(search_query, case=False, na=False) |
-                    df_details['group_type'].astype(str).str.contains(search_query, case=False, na=False)
+                    df_details['display_rule'].astype(str).str.contains(search_query, case=False, na=False, regex=False) |
+                    df_details['exception_summary'].astype(str).str.contains(search_query, case=False, na=False, regex=False) |
+                    df_details['message_summary'].astype(str).str.contains(search_query, case=False, na=False, regex=False) |
+                    df_details['group_type'].astype(str).str.contains(search_query, case=False, na=False, regex=False)
                 )
                 filtered_df = df_details[mask]
             else:
