@@ -24,7 +24,9 @@ OPENSEARCH_PASS = os.getenv("OPENSEARCH_PASS")
 INDEX_NAME = os.getenv("INDEX_NAME", "pega-logs")
 
 # Tunable settings
-CHUNK_SIZE = int(os.getenv("BULK_CHUNK_SIZE", "500"))
+# Tunable settings
+CHUNK_SIZE = int(os.getenv("BULK_CHUNK_SIZE", "2500")) # Increased for throughput
+CLIENT_TIMEOUT = int(os.getenv("OPENSEARCH_TIMEOUT", "120"))
 CLIENT_TIMEOUT = int(os.getenv("OPENSEARCH_TIMEOUT", "120"))
 
 def get_opensearch_client():
@@ -43,6 +45,53 @@ def get_opensearch_client():
         max_retries=3,
         retry_on_timeout=True,
     )
+
+# --- Optimization Helpers ---
+
+class OptimizeIndexSettings:
+    """Context manager to optimize index settings for bulk ingestion."""
+    def __init__(self, client, index_name):
+        self.client = client
+        self.index_name = index_name
+        self.original_settings = {}
+
+    def __enter__(self):
+        print(f"[INFO] Optimizing index settings for {self.index_name}...")
+        try:
+            # save current settings (refresh_interval, number_of_replicas)
+            # We fetch all settings, but we only really care about these two being restored if they were explicitly set.
+            # For simplicity, we assume we want to restore to '1s' and '1' (or '0' if single node) defaults if not found.
+            settings = self.client.indices.get_settings(index=self.index_name)
+            idx_settings = settings.get(self.index_name, {}).get('settings', {}).get('index', {})
+            
+            self.original_settings['refresh_interval'] = idx_settings.get('refresh_interval', '1s')
+            self.original_settings['number_of_replicas'] = idx_settings.get('number_of_replicas', '1')
+            
+            # Apply optimizations
+            self.client.indices.put_settings(index=self.index_name, body={
+                "index": {
+                    "refresh_interval": "-1",
+                    "number_of_replicas": 0
+                }
+            })
+        except Exception as e:
+            print(f"[WARN] Failed to optimize settings: {e}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        print(f"[INFO] Restoring index settings for {self.index_name}...")
+        try:
+            # Restore
+            self.client.indices.put_settings(index=self.index_name, body={
+                "index": {
+                    "refresh_interval": self.original_settings.get('refresh_interval', '1s'),
+                    "number_of_replicas": self.original_settings.get('number_of_replicas', 1)
+                }
+            })
+            # Force a refresh so data is visible immediately after
+            self.client.indices.refresh(index=self.index_name)
+        except Exception as e:
+            print(f"[WARN] Failed to restore settings: {e}")
 
 # --- Pega Parsing Logic ---
 
@@ -355,7 +404,7 @@ def ingest_single_file(file_path: str):
                     ignored_local += 1
     
     # Track stats
-    success = 0
+    success_count = 0
     failure = 0
     duplicates = 0  # Track duplicates
     
@@ -370,45 +419,39 @@ def ingest_single_file(file_path: str):
     print(f"Session ID: {session_id}")
     
     try:
-        # Get total lines for progress if possible (expensive for large files but gives ETA)
-        # For 4GB file, counting lines might take a while. Let's skip valid total for now or do a quick estimate?
-        # A simple byte size estimation could be better for progress bar, but line based is easier for logic.
-        # We will just iterate.
-        
         iterator = actions()
         if use_tqdm:
-            # If we don't know total, tqdm still shows simple stats
             iterator = tqdm(iterator, unit="lines", desc="Ingesting")
             
-        # Use streaming_bulk with yield_ok=False to get detailed results
-        # We use 'create' op_type in the actions to ensure we don't overwrite
-        for ok, result in helpers.streaming_bulk(
-            client,
-            iterator,
-            chunk_size=CHUNK_SIZE,
-            max_retries=3,
-            raise_on_error=False,     # Don't raise on 409 Conflict
-            raise_on_exception=False, # Don't raise on other errors immediately
-            request_timeout=CLIENT_TIMEOUT,
-        ):
-            if ok:
-                success += 1
-            else:
-                # result is like {'create': {'_index':..., 'status': 409, ...}}
-                op_result = result.get('create') or result.get('index') or {}
-                status_code = op_result.get('status')
-                
-                if status_code == 409:
-                    duplicates += 1
+        # Use parallel_bulk for high throughput
+        with OptimizeIndexSettings(client, INDEX_NAME):
+            for success, info in helpers.parallel_bulk(
+                client,
+                iterator,
+                thread_count=4,  # Use 4 threads
+                queue_size=8,
+                chunk_size=CHUNK_SIZE,
+                raise_on_error=False,
+                raise_on_exception=False,
+                request_timeout=CLIENT_TIMEOUT,
+            ):
+                if success:
+                    success_count += 1
                 else:
-                    # Only print failures if not using tqdm to avoid messing up the bar
-                    if not use_tqdm:
-                         print(f"Failed doc: {result}")
-                    failure += 1
-            
-            # Periodic print if no tqdm
-            if not use_tqdm and (success + duplicates + failure) % 1000 == 0:
-                print(f"Processed {success + duplicates + failure} lines...", end='\r')
+                    # info is like {'create': {'_index':..., 'status': 409, ...}}
+                    op_result = info.get('create') or info.get('index') or {}
+                    status_code = op_result.get('status')
+                    
+                    if status_code == 409:
+                        duplicates += 1
+                    else:
+                        if not use_tqdm:
+                             print(f"Failed doc: {info}")
+                        failure += 1
+                
+                # Periodic print if no tqdm
+                if not use_tqdm and (success_count + duplicates + failure) % 5000 == 0:
+                    print(f"Processed {success_count + duplicates + failure} lines...", end='\r')
 
     except Exception as e:
         print(f"Bulk indexing error: {e}")
@@ -418,7 +461,7 @@ def ingest_single_file(file_path: str):
     return {
         "status": "success",
         "session_id": session_id,
-        "total_indexed": success,
+        "total_indexed": success_count,
         "failed": failure,
         "duplicates_skipped": duplicates,
         "ignored": ignored_local,

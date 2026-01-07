@@ -28,7 +28,7 @@ OPENSEARCH_USER = os.getenv("OPENSEARCH_USER")
 OPENSEARCH_PASS = os.getenv("OPENSEARCH_PASS")
 SOURCE_INDEX = "pega-logs"
 DEST_INDEX = "pega-analysis-results"
-CUSTOM_PATTERNS_FILE = "custom_patterns.json"
+
 
 def load_custom_patterns(client):
     """Load custom regex patterns from OpenSearch index."""
