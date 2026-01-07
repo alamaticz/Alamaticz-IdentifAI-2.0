@@ -1124,33 +1124,28 @@ elif page == "Grouping Studio":
 
                     # 3. Run Grouper (Optimized)
                     status_text.text("Step 3/4: Running new grouping analysis (this may take a minute)...")
-                    import subprocess
-                    import sys
-                    result = subprocess.run(
-                        [sys.executable, "log_grouper.py", "--ignore-checkpoint", "--batch-size", "2000"],
-                        capture_output=True, 
-                        text=True, 
-                        cwd=os.getcwd()
-                    )
                     
-                    if result.returncode != 0:
-                        st.error("Grouping Failed.")
-                        st.code(result.stderr)
-                        st.stop()
-                    
-                    progress_bar.progress(75)
+                    try:
+                        from log_grouper import process_logs
+                        
+                        # Capture stdout/stderr if needed, or just let it print to console logs
+                        # For blocking UI, we can just run it.
+                        process_logs(ignore_checkpoint=True, batch_size=2000)
+                        
+                        progress_bar.progress(75)
 
-                    # 4. Restore
-                    status_text.text("Step 4/4: Restoring manual status labels...")
-                    restored_count = restore_analysis_status(client, backup_data)
-                    progress_bar.progress(100)
-                    
-                    status_text.text("Done!")
-                    time.sleep(1)
-                    st.success(f"Analysis Reset & Updated! (Restored {restored_count} manual labels)")
-                    
-                    with st.expander("View Output Logs"):
-                        st.code(result.stdout)
+                        # 4. Restore
+                        status_text.text("Step 4/4: Restoring manual status labels...")
+                        restored_count = restore_analysis_status(client, backup_data)
+                        progress_bar.progress(100)
+                        
+                        status_text.text("Done!")
+                        time.sleep(1)
+                        st.success(f"Analysis Reset & Updated! (Restored {restored_count} manual labels)")
+                        
+                    except Exception as e:
+                         st.error(f"Grouping Failed: {e}")
+                         st.stop()
                         
                 except Exception as e:
                      st.error(f"Workflow failed: {e}")
