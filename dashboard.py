@@ -1051,50 +1051,61 @@ elif page == "Grouping Studio":
                      st.divider()
                      st.subheader("3. Save Rule")
                      
-                     # Use defaults if available
-                     pat_val = st.session_state.generated_pattern
-                     name_val = st.session_state.get("suggested_name", "")
-                     type_val = st.session_state.get("suggested_type", "Custom")
-                     
-                     pat = st.text_input("Regex Pattern", value=pat_val)
-                     c1, c2 = st.columns(2)
-                     rule_name = c1.text_input("Rule Name", value=name_val, placeholder="e.g. Activity Timeouts")
-                     group_cat = c2.text_input("Group Category", value=type_val, placeholder="e.g. CSP, Infrastructure")
-                     
-                     if st.button("Save Rule to Library"):
-                         if pat and rule_name:
-                             new_rule = {
-                                 "name": rule_name,
-                                 "pattern": pat,
-                                 "group_type": group_cat
-                             }
-                             
-                             # Smart Save: Overwrite if name exists, else append
-                             custom_patterns = []
-                             if os.path.exists("custom_patterns.json"):
+                     with st.form("save_rule_form"):
+                         # Use defaults if available
+                         pat_val = st.session_state.generated_pattern
+                         name_val = st.session_state.get("suggested_name", "")
+                         type_val = st.session_state.get("suggested_type", "Custom")
+                         
+                         pat = st.text_input("Regex Pattern", value=pat_val)
+                         c1, c2 = st.columns(2)
+                         # Explicit key management to avoid conflicts if needed, but form isolates them
+                         rule_name = c1.text_input("Rule Name", value=name_val, placeholder="e.g. Activity Timeouts")
+                         group_cat = c2.text_input("Group Category", value=type_val, placeholder="e.g. CSP, Infrastructure")
+                         
+                         submitted = st.form_submit_button("Save Rule to Library")
+
+                         if submitted:
+                             if pat and rule_name:
+                                 new_rule = {
+                                     "name": rule_name,
+                                     "pattern": pat,
+                                     "group_type": group_cat
+                                 }
+                                 
+                                 # Smart Save: Overwrite if name exists, else append
+                                 custom_patterns = []
+                                 pattern_file = "custom_patterns.json"
+                                 
                                  try:
-                                     with open("custom_patterns.json", "r") as f:
-                                         custom_patterns = json.load(f)
-                                 except: pass
-                             
-                             updated = False
-                             for idx, r in enumerate(custom_patterns):
-                                 if r["name"] == rule_name:
-                                     custom_patterns[idx] = new_rule
-                                     updated = True
-                                     break
-                             
-                             if not updated:
-                                 custom_patterns.append(new_rule)
-                             
-                             with open("custom_patterns.json", "w") as f:
-                                 json.dump(custom_patterns, f, indent=2)
-                             
-                             msg = "Rule Updated!" if updated else "Rule Saved!"
-                             st.success(f"{msg} Reloading...")
-                             st.rerun()
-                         else:
-                             st.warning("Please provide both name and pattern.")
+                                     if os.path.exists(pattern_file):
+                                         with open(pattern_file, "r") as f:
+                                             custom_patterns = json.load(f)
+                                 except Exception as e:
+                                     st.warning(f"Could not load existing patterns (starting fresh): {e}")
+
+                                 updated = False
+                                 for idx, r in enumerate(custom_patterns):
+                                     if r["name"] == rule_name:
+                                         custom_patterns[idx] = new_rule
+                                         updated = True
+                                         break
+                                 
+                                 if not updated:
+                                     custom_patterns.append(new_rule)
+                                 
+                                 try:
+                                     with open(pattern_file, "w") as f:
+                                         json.dump(custom_patterns, f, indent=2)
+                                     
+                                     msg = "Rule Updated!" if updated else "Rule Saved!"
+                                     st.success(f"{msg} Reloading...")
+                                     time.sleep(1)
+                                     st.rerun()
+                                 except Exception as e:
+                                     st.error(f"Failed to save to {pattern_file}: {e}")
+                             else:
+                                 st.warning("Please provide both name and pattern.")
             
             # 4. Automation: Run Grouper
             st.divider()
