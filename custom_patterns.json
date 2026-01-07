@@ -1,12 +1,12 @@
 [
   {
-    "name": "Unexpected RuntimeException in assembly FixedPipeline for",
-    "pattern": "Unexpected RuntimeException in assembly FixedPipeline for: RULE-[A-Z-]+ [A-Z-]+ [A-Z_]+ #[\\d]{8}T[\\d]{6}\\.[\\d]{3} GMT",
-    "group_type": "Pega Engine Errors"
+    "name": "Unexpected_RuntimeException_in_FixedPipeline",
+    "pattern": "^Unexpected RuntimeException in assembly FixedPipeline for: RULE-OBJ-(WHEN|MODEL)|RULE-DECLARE-DECISIONTABLE [A-Z0-9-]+ [A-Z0-9_@]+ #[\\d]{8}T[\\d]{6}\\.[\\d]{3} GMT$",
+    "group_type": "RuntimeException_Logs"
   },
   {
-    "name": "Unexpected RuntimeException in assembly FixedPipeline for",
-    "pattern": "Unexpected RuntimeException in assembly FixedPipeline for: RULE-OBJ-(?:WHEN|MODEL) (?:PDS-PBD-DATA-OFFICE ISDEALADDRESSCONFIRMED|@BASECLASS PYGETROUTINGTABLECONFIG) #[\\d]{8}T[\\d]{6}\\.[\\d]{3} GMT(?: \\(\\+\\d+ others\\))?",
-    "group_type": "Pega Engine Errors"
+    "name": "Begin_End_Length_Logs",
+    "pattern": "^begin [\\d]+, end [\\d]+, length [\\d]+$",
+    "group_type": "Length_Logs"
   }
 ]

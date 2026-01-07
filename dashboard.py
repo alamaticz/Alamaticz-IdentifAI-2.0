@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import os
+import time
+import re
 from dotenv import load_dotenv
 # import asyncio
 # import nest_asyncio
@@ -11,7 +13,7 @@ from dotenv import load_dotenv
 # from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 # from langchain.memory import ConversationBufferMemory
 # from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
-from opensearchpy import OpenSearch
+from opensearchpy import OpenSearch, helpers
 import json
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
@@ -288,7 +290,7 @@ def fetch_detailed_table_data(client, size=1000):
             })
         df = pd.DataFrame(data)
         if not df.empty and 'last_seen' in df.columns:
-            df['last_seen'] = pd.to_datetime(df['last_seen'])
+            df['last_seen'] = pd.to_datetime(df['last_seen'], format='mixed')
         return df
     except Exception as e:
         st.error(f"Error fetching details: {e}")
@@ -306,6 +308,76 @@ def update_document_status(client, doc_id, new_status):
     except Exception as e:
         st.error(f"Error updating status: {e}")
         return False
+
+def backup_analysis_status(client):
+    """
+    Backup diagnosis statuses before deletion.
+    Returns a dict: {group_signature: {status: ..., report: ...}}
+    Only backs up non-PENDING items.
+    """
+    backup = {}
+    try:
+        query = {
+            "size": 10000,
+            "query": {
+                "bool": {
+                    "must_not": [
+                        {"term": {"diagnosis.status": "PENDING"}}
+                    ]
+                }
+            }
+        }
+        res = client.search(index="pega-analysis-results", body=query)
+        for hit in res['hits']['hits']:
+            src = hit['_source']
+            sig = src.get('group_signature')
+            diag = src.get('diagnosis', {})
+            if sig:
+                backup[sig] = diag
+        return backup
+    except Exception as e:
+        # Index might not exist
+        return {}
+
+def restore_analysis_status(client, backup_data):
+    """
+    Restore diagnosis statuses to the new analysis results.
+    """
+    if not backup_data:
+        return 0
+    
+    restored_count = 0
+    try:
+        # Inefficient but simple: Scan new groups and check if they are in backup
+        query = {"query": {"match_all": {}}}
+        scan = helpers.scan(client, index="pega-analysis-results", query=query)
+        
+        bulk_updates = []
+        
+        for doc in scan:
+            doc_id = doc['_id']
+            sig = doc['_source'].get('group_signature')
+            
+            if sig in backup_data:
+                # Add to bulk update
+                action = {
+                    "_op_type": "update",
+                    "_index": "pega-analysis-results",
+                    "_id": doc_id,
+                    "doc": {
+                        "diagnosis": backup_data[sig]
+                    }
+                }
+                bulk_updates.append(action)
+                restored_count += 1
+        
+        if bulk_updates:
+            helpers.bulk(client, bulk_updates)
+            
+    except Exception as e:
+        print(f"Restore failed: {e}")
+        
+    return restored_count
 
 # --- Custom CSS ---
 def local_css():
@@ -429,7 +501,7 @@ def calculate_summary_metrics(client):
         if last_res["hits"]["hits"]:
             timestamp = last_res["hits"]["hits"][0]["_source"].get("ingestion_timestamp")
             try:
-                dt = pd.to_datetime(timestamp)
+                dt = pd.to_datetime(timestamp, format='mixed')
                 suffix = 'th' if 11 <= dt.day <= 13 else {1:'st', 2:'nd', 3:'rd'}.get(dt.day % 10, 'th')
                 # explicit format: "31st dec 2026 , 7:06 am"
                 date_part = f"{dt.day}{suffix} {dt.strftime('%b').lower()} {dt.year}"
@@ -785,6 +857,7 @@ elif page == "Upload Logs":
                     # Save to temp file
                     import tempfile
                     from ingest_pega_logs import ingest_file
+                    from log_grouper import process_logs
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".log") as tmp_file:
                         tmp_file.write(uploaded_file.getvalue())
@@ -799,6 +872,17 @@ elif page == "Upload Logs":
                     if result.get("status") == "success":
                         st.success("Ingestion Complete!")
                         st.json(result)
+                        
+                        # Trigger Grouping for this session
+                        if result.get("session_id"):
+                            st.info("Analyzing and grouping imported logs... (This may take a moment)")
+                            with st.spinner("Running Grouping Logic..."):
+                                try:
+                                    process_logs(session_id=result.get("session_id"), ignore_checkpoint=True)
+                                    st.success("Grouping Analysis Complete!")
+                                except Exception as e:
+                                    st.error(f"Grouping failed: {e}")
+                                    
                         st.balloons()
                     else:
                         st.error(f"Ingestion failed: {result.get('message')}")
@@ -897,36 +981,33 @@ elif page == "Grouping Studio":
                 if st.button("✨ Generate Regex Pattern", key="generate_regex_btn"):
                     with st.spinner("Analyzing patterns & checking existing rules..."):
                         try:
-                            # 1. Load Existing Rules to provide context
-                            existing_rules_str = "[]"
+                            llm = ChatOpenAI(model="gpt-4o", temperature=0)
+                            
+                            custom_patterns = []
                             if os.path.exists("custom_patterns.json"):
                                 try:
                                     with open("custom_patterns.json", "r") as f:
-                                        existing_data = json.load(f)
-                                        # Send simplified version to save tokens
-                                        simple_rules = [{"name": r["name"], "pattern": r["pattern"], "group_type": r.get("group_type", "Custom")} for r in existing_data]
-                                        existing_rules_str = json.dumps(simple_rules, indent=2)
+                                        custom_patterns = json.load(f)
                                 except: pass
-
-                            llm = ChatOpenAI(model="gpt-4o", temperature=0)
+                            
+                            existing_rules_str = json.dumps(custom_patterns, indent=2) if custom_patterns else "[]"
                             
                             prompt = ChatPromptTemplate.from_template(
                                 """
-                                You are a Regex Expert and Log Analyst.
+                                You are a regex expert for log grouping.
                                 
-                                **Task**: 
-                                Analyze these {count} NEW log error strings against the EXISTING rules.
-                                
-                                **Existing Rules**:
+                                **Task**:
+                                1. Analyze the following log signatures/messages (represented by {count} examples).
+                                2. Checks against these **EXISTING RULES**:
                                 {existing_rules}
                                 
-                                **New Log Examples**:
+                                **Decision Logic**:
+                                - If the examples **match an existing rule** (or are a minor variation), suggest an **UPDATE** to that rule to cover these new cases.
+                                - If the examples represent a **completely new pattern**, suggest a **NEW** rule.
+                                
+                                **Input Examples**:
                                 {examples}
                                 
-                                **Goal**:
-                                Determine if the new logs belong to an EXISTING rule (but the regex was too strict) or if this is a completely NEW issue.
-                                
-                                **Output format**:
                                 Return strictly Valid JSON:
                                 {{
                                     "action": "UPDATE" or "NEW",
@@ -978,79 +1059,101 @@ elif page == "Grouping Studio":
                      pat = st.text_input("Regex Pattern", value=pat_val)
                      c1, c2 = st.columns(2)
                      rule_name = c1.text_input("Rule Name", value=name_val, placeholder="e.g. Activity Timeouts")
-                     group_type = c2.text_input("Group Category", value=type_val, placeholder="e.g. CSP, Infrastructure")
+                     group_cat = c2.text_input("Group Category", value=type_val, placeholder="e.g. CSP, Infrastructure")
                      
-                     if st.button("Save to Custom Patterns"):
-                         if rule_name and pat:
-                             # Load existing
-                             existing = []
-                             if os.path.exists("custom_patterns.json"):
-                                 with open("custom_patterns.json", "r") as f:
-                                     try:
-                                         existing = json.load(f)
-                                     except: pass
+                     if st.button("Save Rule to Library"):
+                         if pat and rule_name:
+                             new_rule = {
+                                 "name": rule_name,
+                                 "pattern": pat,
+                                 "group_type": group_cat
+                             }
                              
-                             # Check for overwrite using Rule Name
+                             # Smart Save: Overwrite if name exists, else append
+                             custom_patterns = []
+                             if os.path.exists("custom_patterns.json"):
+                                 try:
+                                     with open("custom_patterns.json", "r") as f:
+                                         custom_patterns = json.load(f)
+                                 except: pass
+                             
                              updated = False
-                             for i, rule in enumerate(existing):
-                                 if rule["name"] == rule_name:
-                                     existing[i]["pattern"] = pat
-                                     existing[i]["group_type"] = group_type
+                             for idx, r in enumerate(custom_patterns):
+                                 if r["name"] == rule_name:
+                                     custom_patterns[idx] = new_rule
                                      updated = True
                                      break
-                            
+                             
                              if not updated:
-                                 new_rule = {
-                                     "name": rule_name,
-                                     "pattern": pat,
-                                     "group_type": group_type if group_type else "Custom"
-                                 }
-                                 existing.append(new_rule)
+                                 custom_patterns.append(new_rule)
                              
                              with open("custom_patterns.json", "w") as f:
-                                 json.dump(existing, f, indent=2)
-                                 
-                             if updated:
-                                 st.info(f"Updated existing rule '{rule_name}' with new pattern!")
-                             else:
-                                 st.success(f"Created new rule '{rule_name}'!")
-                                 
-                             # Cleanup session
-                             if "generated_pattern" in st.session_state: del st.session_state.generated_pattern
-                             if "suggested_name" in st.session_state: del st.session_state.suggested_name
-                             if "suggested_type" in st.session_state: del st.session_state.suggested_type
+                                 json.dump(custom_patterns, f, indent=2)
+                             
+                             msg = "Rule Updated!" if updated else "Rule Saved!"
+                             st.success(f"{msg} Reloading...")
+                             st.rerun()
                          else:
-                             st.warning("Please provide both Rule Name and Pattern.")
+                             st.warning("Please provide both name and pattern.")
             
             # 4. Automation: Run Grouper
             st.divider()
             st.subheader("4. Apply Changes")
             st.markdown("Run the grouping logic now to apply your new rules to existing logs.")
             
-            if st.button("🚀 Apply Rules Now (Run Grouper)", type="primary"):
-                with st.spinner("Running Grouping Logic... This may take a minute."):
-                    try:
-                        import subprocess
-                        # Run the script and capture output
-                        result = subprocess.run(
-                            ["python", "log_grouper.py"], 
-                            capture_output=True, 
-                            text=True, 
-                            cwd=os.getcwd()
-                        )
+            if st.button("🚀 Apply Rules Now (Reset & Reprocess)", type="primary"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                try:
+                    # 1. Backup
+                    status_text.text("Step 1/4: Backing up manual analysis...")
+                    backup_data = backup_analysis_status(client)
+                    progress_bar.progress(25)
+                    time.sleep(0.5)
+
+                    # 2. Delete Index
+                    status_text.text("Step 2/4: Resetting analysis index...")
+                    client.indices.delete(index="pega-analysis-results", ignore=[400, 404])
+                    progress_bar.progress(50)
+                    time.sleep(0.5)
+
+                    # 3. Run Grouper (Optimized)
+                    status_text.text("Step 3/4: Running new grouping analysis (this may take a minute)...")
+                    import subprocess
+                    result = subprocess.run(
+                        ["python", "log_grouper.py", "--ignore-checkpoint", "--batch-size", "2000"],
+                        capture_output=True, 
+                        text=True, 
+                        cwd=os.getcwd()
+                    )
+                    
+                    if result.returncode != 0:
+                        st.error("Grouping Failed.")
+                        st.code(result.stderr)
+                        st.stop()
+                    
+                    progress_bar.progress(75)
+
+                    # 4. Restore
+                    status_text.text("Step 4/4: Restoring manual status labels...")
+                    restored_count = restore_analysis_status(client, backup_data)
+                    progress_bar.progress(100)
+                    
+                    status_text.text("Done!")
+                    time.sleep(1)
+                    st.success(f"Analysis Reset & Updated! (Restored {restored_count} manual labels)")
+                    
+                    with st.expander("View Output Logs"):
+                        st.code(result.stdout)
                         
-                        if result.returncode == 0:
-                            st.success("Grouping Completed Successfully!")
-                            with st.expander("View Output Logs"):
-                                st.code(result.stdout)
-                        else:
-                            st.error("Grouping Failed.")
-                            with st.expander("View Error Logs"):
-                                st.code(result.stderr)
-                                st.code(result.stdout)
-                                
-                    except Exception as e:
-                        st.error(f"Failed to execute script: {str(e)}")
+                except Exception as e:
+                     st.error(f"Workflow failed: {e}")
+                finally:
+                     # Clean up UI
+                     time.sleep(2)
+                     status_text.empty()
+                     progress_bar.empty()
 
             else:
                 st.warning("No logs found matching query.")

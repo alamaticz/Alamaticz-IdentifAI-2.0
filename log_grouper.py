@@ -164,7 +164,7 @@ def safe_bulk(client, actions, retries=3, backoff=1.0):
                 raise
             time.sleep(backoff * (attempt + 1))
 
-def process_logs(limit=None, batch_size=100):
+def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_id=None):
     """
     Main processing loop.
     Scanning -> Grouping -> Bulk Indexing
@@ -200,9 +200,11 @@ def process_logs(limit=None, batch_size=100):
     last_checkpoint = get_last_checkpoint(client)
     start_filter = None
     
-    if last_checkpoint:
+    if last_checkpoint and not ignore_checkpoint:
         print(f"[INFO] Found checkpoint. Processing logs after: {last_checkpoint}")
         start_filter = last_checkpoint
+    elif ignore_checkpoint:
+        print("[INFO] Ignoring checkpoint. Processing ALL logs.")
     else:
         print("[INFO] No checkpoint found. Processing ALL logs.")
 
@@ -210,8 +212,6 @@ def process_logs(limit=None, batch_size=100):
     custom_patterns = load_custom_patterns()
     if custom_patterns:
         print(f"[INFO] Loaded {len(custom_patterns)} custom grouping rules.")
-
-    # Query: Fetch only ERROR logs
 
     # Query: Fetch only ERROR logs
     query = {
@@ -225,10 +225,23 @@ def process_logs(limit=None, batch_size=100):
     }
     
     # Add Range Filter if checkpoint exists
-    if start_filter:
+    if start_filter and not ignore_checkpoint and not session_id:
         query["query"]["bool"]["filter"] = [
             {"range": {"ingestion_timestamp": {"gte": start_filter}}}
         ]
+
+    # Add Session ID Filter if provided
+    if session_id:
+        # If filtering by session, we might want to ensure we don't accidentally filter by checkpoint?
+        # User explicitly requested this session, so likely we ignore checkpoint for this run or combine?
+        # Let's add it to the filter list.
+        if "filter" not in query["query"]["bool"]:
+            query["query"]["bool"]["filter"] = []
+        
+        query["query"]["bool"]["filter"].append(
+            {"term": {"session_id": session_id}}
+        )
+        print(f"[INFO] Filtering by Session ID: {session_id}")
 
     print("[INFO] Starting scan...")
     scanner = helpers.scan(
@@ -486,6 +499,10 @@ def process_logs(limit=None, batch_size=100):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pega Log Grouper (OpenSearch)")
     parser.add_argument("--limit", type=int, help="Limit number of logs to process", default=None)
+    parser.add_argument("--ignore-checkpoint", action="store_true", help="Ignore checkpoint and process all logs")
+    parser.add_argument("--session-id", type=str, help="Process specific session ID", default=None)
+    parser.add_argument("--batch-size", type=int, help="Bulk indexing batch size", default=5000)
     args = parser.parse_args()
     
-    process_logs(limit=args.limit)
+    # Pass the argument to process_logs.
+    process_logs(limit=args.limit, ignore_checkpoint=args.ignore_checkpoint, session_id=args.session_id, batch_size=args.batch_size)
