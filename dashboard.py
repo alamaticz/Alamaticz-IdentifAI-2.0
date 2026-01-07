@@ -1125,8 +1125,9 @@ elif page == "Grouping Studio":
                     # 3. Run Grouper (Optimized)
                     status_text.text("Step 3/4: Running new grouping analysis (this may take a minute)...")
                     import subprocess
+                    import sys
                     result = subprocess.run(
-                        ["python", "log_grouper.py", "--ignore-checkpoint", "--batch-size", "2000"],
+                        [sys.executable, "log_grouper.py", "--ignore-checkpoint", "--batch-size", "2000"],
                         capture_output=True, 
                         text=True, 
                         cwd=os.getcwd()
