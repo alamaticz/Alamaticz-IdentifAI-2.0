@@ -30,15 +30,21 @@ SOURCE_INDEX = "pega-logs"
 DEST_INDEX = "pega-analysis-results"
 CUSTOM_PATTERNS_FILE = "custom_patterns.json"
 
-def load_custom_patterns():
-    """Load custom regex patterns from JSON file."""
-    if not os.path.exists(CUSTOM_PATTERNS_FILE):
-        return []
+def load_custom_patterns(client):
+    """Load custom regex patterns from OpenSearch index."""
     try:
-        with open(CUSTOM_PATTERNS_FILE, 'r') as f:
-            return json.load(f)
+        if not client.indices.exists(index="pega-custom-patterns"):
+            print("[WARN] Custom patterns index not found. Skipping.")
+            return []
+            
+        response = client.search(
+            index="pega-custom-patterns",
+            body={"query": {"match_all": {}}, "size": 1000}
+        )
+        patterns = [hit["_source"] for hit in response["hits"]["hits"]]
+        return patterns
     except Exception as e:
-        print(f"[WARN] Failed to load custom patterns: {e}")
+        print(f"[WARN] Failed to load custom patterns from OpenSearch: {e}")
         return []
 
 def check_custom_patterns(message, patterns):
@@ -209,7 +215,7 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
         print("[INFO] No checkpoint found. Processing ALL logs.")
 
     # Load Custom Patterns
-    custom_patterns = load_custom_patterns()
+    custom_patterns = load_custom_patterns(client)
     if custom_patterns:
         print(f"[INFO] Loaded {len(custom_patterns)} custom grouping rules.")
 

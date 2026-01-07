@@ -983,12 +983,15 @@ elif page == "Grouping Studio":
                         try:
                             llm = ChatOpenAI(model="gpt-4o", temperature=0)
                             
+                            # Fetch existing rules from OpenSearch
                             custom_patterns = []
-                            if os.path.exists("custom_patterns.json"):
-                                try:
-                                    with open("custom_patterns.json", "r") as f:
-                                        custom_patterns = json.load(f)
-                                except: pass
+                            try:
+                                # Fetch all (up to 1000)
+                                response = client.search(index="pega-custom-patterns", body={"query": {"match_all": {}}, "size": 1000})
+                                custom_patterns = [hit["_source"] for hit in response["hits"]["hits"]]
+                            except Exception as e:
+                                # Index might not exist yet, which is fine
+                                pass
                             
                             existing_rules_str = json.dumps(custom_patterns, indent=2) if custom_patterns else "[]"
                             
@@ -1073,37 +1076,26 @@ elif page == "Grouping Studio":
                                      "group_type": group_cat
                                  }
                                  
-                                 # Smart Save: Overwrite if name exists, else append
-                                 custom_patterns = []
-                                 pattern_file = "custom_patterns.json"
-                                 
+                                 # Smart Save: Upsert to OpenSearch
                                  try:
-                                     if os.path.exists(pattern_file):
-                                         with open(pattern_file, "r") as f:
-                                             custom_patterns = json.load(f)
-                                 except Exception as e:
-                                     st.warning(f"Could not load existing patterns (starting fresh): {e}")
-
-                                 updated = False
-                                 for idx, r in enumerate(custom_patterns):
-                                     if r["name"] == rule_name:
-                                         custom_patterns[idx] = new_rule
-                                         updated = True
-                                         break
-                                 
-                                 if not updated:
-                                     custom_patterns.append(new_rule)
-                                 
-                                 try:
-                                     with open(pattern_file, "w") as f:
-                                         json.dump(custom_patterns, f, indent=2)
+                                     # Use rule name as ID for idempotency
+                                     doc_id = rule_name
                                      
-                                     msg = "Rule Updated!" if updated else "Rule Saved!"
-                                     st.success(f"{msg} Reloading...")
+                                     # Add timestamp
+                                     new_rule["created_at"] = datetime.utcnow().isoformat()
+                                     
+                                     client.index(
+                                         index="pega-custom-patterns",
+                                         id=doc_id,
+                                         body=new_rule,
+                                         refresh=True
+                                     )
+                                     
+                                     st.success("Rule Saved to OpenSearch Library! Reloading...")
                                      time.sleep(1)
                                      st.rerun()
                                  except Exception as e:
-                                     st.error(f"Failed to save to {pattern_file}: {e}")
+                                     st.error(f"Failed to save rule to OpenSearch: {e}")
                              else:
                                  st.warning("Please provide both name and pattern.")
             
