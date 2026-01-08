@@ -646,7 +646,26 @@ if page == "Dashboard":
         st.markdown("---")
 
         # 2. Detailed Table
-        st.subheader("📋 Detailed Group Analysis")
+        c_tbl_head, c_tbl_btn = st.columns([3, 1])
+        c_tbl_head.subheader("📋 Detailed Group Analysis")
+        with c_tbl_btn:
+            if st.button("✨ Analyse Top 5 Errors", help="Run AI Diagnosis on top pending error groups"):
+                with st.spinner("Running AI Diagnosis... (This may take a minute)"):
+                    try:
+                        import subprocess
+                        # Run the diagnosis script as a separate process
+                        result = subprocess.run(["python", "Analysis_Diagnosis.py"], capture_output=True, text=True)
+                        if result.returncode == 0:
+                            st.success("Diagnosis Complete!")
+                            with st.expander("View Analysis Logs"):
+                                st.text(result.stdout)
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Diagnosis Failed Check logs.")
+                            st.text(result.stderr)
+                    except Exception as e:
+                        st.error(f"Failed to trigger analysis: {e}")
         df_details = fetch_detailed_table_data(client)
         
         if not df_details.empty:
@@ -1223,8 +1242,8 @@ elif page == "Grouping Studio":
                                          refresh=True
                                      )
                                      
-                                     st.success("Rule Saved to OpenSearch Library! Reloading...")
-                                     time.sleep(1)
+                                     st.success(f"Rule '{rule_name}' stored successfully! Index updated.")
+                                     time.sleep(2)
                                      st.rerun()
                                  except Exception as e:
                                      st.error(f"Failed to save rule to OpenSearch: {e}")
