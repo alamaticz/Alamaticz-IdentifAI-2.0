@@ -336,6 +336,59 @@ def fetch_group_samples(client, group_id, max_samples=5):
     except Exception as e:
         return []
 
+@st.dialog("🔍 Detailed Group Inspection", width="large")
+def show_inspection_dialog(group_id, row_data, client):
+    """
+    Dialog to show detailed inspection of a group.
+    """
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.markdown(f"**Rule/Message**: `{row_data.get('display_rule', 'N/A')}`")
+        st.markdown(f"**Group Type**: {row_data.get('group_type', 'N/A')}")
+        st.markdown(f"**Signature**: `{row_data.get('group_signature', 'N/A')}`")
+    with c2:
+        st.metric("Total Count", row_data.get('count', 0))
+        st.metric("Status", row_data.get('diagnosis.status', 'N/A'))
+
+    st.divider()
+
+    # Diagnosis Report
+    report = row_data.get('diagnosis.report')
+    if report and report != 'N/A':
+        st.markdown("### 🧠 AI Diagnosis Report")
+        with st.container(border=True):
+            st.markdown(report)
+        st.divider()
+
+    # Fetch Samples
+    st.markdown("### 📄 Sample Logs")
+    with st.spinner("Fetching raw sample logs..."):
+        samples = fetch_group_samples(client, group_id)
+    
+    if samples:
+        tabs = st.tabs([f"Log {i+1}" for i in range(len(samples))])
+        for i, sample in enumerate(samples):
+            with tabs[i]:
+                # Display pretty JSON or formatted message
+                msg = sample.get('log', {}).get('message', 'N/A')
+                exc = sample.get('exception_message', 'N/A')
+                stack = sample.get('stack_trace', [])
+                
+                st.code(msg, language="text")
+                if exc != 'N/A':
+                    st.error(f"Exception: {exc}")
+                
+                if stack:
+                    st.warning("Stack Trace Available")
+                    with st.expander("View Stack Trace"):
+                        st.code("\n".join(stack), language="java")
+                        
+                with st.expander("Full JSON Metadata"):
+                    st.json(sample)
+    else:
+        st.warning("No raw sample logs found linked to this group (stats-only group or data retention issue).")
+
+
 def backup_analysis_status(client):
     """
     Backup diagnosis statuses before deletion.
@@ -623,11 +676,16 @@ if page == "Dashboard":
             # Merge and deduplicate, keeping standard options order preferred
             all_options = list(dict.fromkeys(standard_options + existing_statuses))
 
+            # Add Inspect Column
+            if "Inspect" not in filtered_df.columns:
+                filtered_df.insert(0, "Inspect", False)
+
             # Table with editing
             edited_df = st.data_editor(
                 filtered_df, 
                 width="stretch",
                 column_config={
+                    "Inspect": st.column_config.CheckboxColumn(help="Check to inspect details", width="small", default=False),
                     "doc_id": None, 
                     "last_seen": st.column_config.DatetimeColumn("Last Seen", format="D MMM YYYY, h:mm a"),
                     "count": st.column_config.ProgressColumn("Count", format="%d", min_value=0, max_value=int(df_details['count'].max())),
@@ -645,6 +703,14 @@ if page == "Dashboard":
                 hide_index=True,
                 key="detailed_table"
             )
+            
+            # --- POPUP LOGIC ---
+            inspected_rows = edited_df[edited_df["Inspect"]]
+            if not inspected_rows.empty:
+                # Show dialog for the first selected
+                row = inspected_rows.iloc[0]
+                show_inspection_dialog(row['doc_id'], row, client)
+
 
             # Detect Changes
             if not filtered_df.equals(edited_df):
@@ -972,9 +1038,6 @@ elif page == "Grouping Studio":
             # Add Select Column
             # If we are re-rendering with a new key, this column value effectively resets the editor state
             df_details.insert(0, "Select", default_select)
-            
-            # Add Inspect Column
-            df_details.insert(1, "Inspect", False)
 
             # Client-side Filtering based on Search Query
             if search_query:
@@ -1001,7 +1064,6 @@ elif page == "Grouping Studio":
                 width="stretch",
                 column_config={
                     "Select": st.column_config.CheckboxColumn(required=True),
-                    "Inspect": st.column_config.CheckboxColumn(help="Check to view detailed logs below", default=False),
                     "doc_id": None, 
                     "last_seen": st.column_config.DatetimeColumn("Last Seen", format="D MMM YYYY, h:mm a"),
                     "count": st.column_config.ProgressColumn("Count", format="%d", min_value=0, max_value=int(df_details['count'].max())),
@@ -1020,55 +1082,8 @@ elif page == "Grouping Studio":
                 key=f"grouping_selector_table_{st.session_state.grouping_editor_key}"
             )
 
-            # --- DETAILED VIEW LOGIC ---
-            # Check if any row has "Inspect" checked
-            inspected_rows = edited_df[edited_df["Inspect"]]
-            if not inspected_rows.empty:
-                st.divider()
-                st.subheader("🔍 Detailed Group Inspection")
-                
-                # Show first selected group
-                row = inspected_rows.iloc[0]
-                group_id = row['doc_id']
-                
-                c1, c2 = st.columns([2, 1])
-                with c1:
-                    st.markdown(f"**Rule/Message**: `{row['display_rule']}`")
-                    st.markdown(f"**Group Type**: {row['group_type']}")
-                    st.markdown(f"**Signature**: `{row['group_signature']}`")
-                with c2:
-                    st.metric("Total Count", row['count'])
-                    st.metric("Status", row['diagnosis.status'])
 
-                # Fetch Samples
-                st.markdown("### 📄 Sample Logs")
-                with st.spinner("Fetching raw sample logs..."):
-                    samples = fetch_group_samples(client, group_id)
-                
-                if samples:
-                    tabs = st.tabs([f"Log #{i+1}" for i in range(len(samples))])
-                    for i, sample in enumerate(samples):
-                        with tabs[i]:
-                            # Display pretty JSON or formatted message
-                            msg = sample.get('log', {}).get('message', 'N/A')
-                            exc = sample.get('exception_message', 'N/A')
-                            stack = sample.get('stack_trace', [])
-                            
-                            st.code(msg, language="text")
-                            if exc != 'N/A':
-                                st.error(f"Exception: {exc}")
-                            
-                            if stack:
-                                st.warning("Stack Trace Available")
-                                with st.expander("View Stack Trace"):
-                                    st.code("\n".join(stack), language="java")
-                                    
-                            with st.expander("Full JSON Metadata"):
-                                st.json(sample)
-                else:
-                    st.warning("No raw sample logs found linked to this group (stats-only group or data retention issue).")
 
-            # --- SELECTION & GROUPING LOGIC ---
             # Get Selected Rows
             selected_rows = edited_df[edited_df["Select"]]
             
@@ -1237,6 +1252,26 @@ elif page == "Grouping Studio":
                     client.indices.delete(index="pega-analysis-results", ignore=[400, 404])
                     progress_bar.progress(50)
                     time.sleep(0.5)
+
+
+                    # 2a. RETRY FAILED DOCS (Enhancement)
+                    # Check for failed_docs.jsonl and ingest if exists
+                    failed_docs_path = "failed_docs.jsonl"
+                    if os.path.exists(failed_docs_path):
+                         status_text.text("Step 2.5/4: Retrying failed documents...")
+                         try:
+                             from ingest_pega_logs import ingest_failed_docs
+                             retry_result = ingest_failed_docs(failed_docs_path)
+                             
+                             if retry_result.get("retried_indexed", 0) > 0:
+                                 st.success(f"Successfully recovered {retry_result['retried_indexed']} failed documents!")
+                             
+                             # Optional: cleanup if successful? 
+                             # Usually safer to keep until manual delete, or rename.
+                             # But for now, we just retry.
+                         except Exception as e:
+                             st.warning(f"Retry step failed: {e}")
+                         time.sleep(0.5)
 
                     # 3. Run Grouper (Optimized)
                     status_text.text("Step 3/4: Running new grouping analysis (this may take a minute)...")
