@@ -28,7 +28,7 @@ OPENSEARCH_USER = os.getenv("OPENSEARCH_USER")
 OPENSEARCH_PASS = os.getenv("OPENSEARCH_PASS")
 SOURCE_INDEX = "pega-logs"
 DEST_INDEX = "pega-analysis-results"
-THREAD_COUNT = int(os.getenv("INGESTION_THREADS", "8"))
+# THREAD_COUNT removed
 CHUNK_SIZE = int(os.getenv("BULK_CHUNK_SIZE", "2500"))
 
 # --- Optimization Helpers ---
@@ -119,7 +119,6 @@ def get_opensearch_client():
         timeout=120,
         max_retries=5,
         retry_on_timeout=True,
-        retry_on_timeout=True,
         retry_on_status=(429, 500, 502, 503, 504)
     )
 
@@ -208,6 +207,15 @@ def safe_bulk(client, actions, retries=3, backoff=1.0):
     for attempt in range(retries):
         try:
             return helpers.bulk(
+                client,
+                actions,
+                raise_on_error=False,
+                raise_on_exception=False,
+                start_response_length=True # Optimization? Removed threading but this is for helpers.bulk
+            )
+        except TypeError:
+            # Fallback for start_response_length if not supported
+             return helpers.bulk(
                 client,
                 actions,
                 raise_on_error=False,
@@ -307,228 +315,197 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
     )
 
     processed_count = 0
-    # Store ref to mutable object to track timestamp in inner function or use nonlocal
-    # We will use a small list to hold the latest timestamp [ts]
-    latest_tracker = [last_checkpoint]
+    actions_buffer = []
+    
+    # Track latest timestamp locally
+    latest_seen_timestamp_local = last_checkpoint
 
-    def action_generator():
-        nonlocal processed_count
-        
-        for doc in scanner:
-            if limit and processed_count >= limit:
-                return
-                
-            source = doc['_source']
-            doc_id = doc['_id']
-            processed_count += 1
-            
-            # Track timestamp
-            doc_ts = source.get('ingestion_timestamp')
-            if doc_ts:
-                # Update tracker if newer
-                if not latest_tracker[0] or doc_ts > latest_tracker[0]:
-                    latest_tracker[0] = doc_ts
-            
-            # --- Extraction ---
-            # 1. Sequence Summary (extract dict values and sort them to ensure deterministic signature)
-            sequence_summary_dict = source.get("sequence_summary", {})
-            sequence_signature = ""
-            if sequence_summary_dict and isinstance(sequence_summary_dict, dict):
-                sorted_keys = sorted(sequence_summary_dict.keys(), key=lambda k: int(k) if k.isdigit() else 999)
-                sequence_parts = [sequence_summary_dict[k] for k in sorted_keys]
-                sequence_signature = " | ".join(sequence_parts)
-            
-            # 2. Exception Info
-            exc_message = source.get("exception_message") or ""
-            norm_exc_message = source.get("normalized_exception_message") or normalize_error_pattern(exc_message)
-            
-            # 3. Log Message
-            raw_message = source.get("log", {}).get("message") or ""
-            norm_message = source.get("normalized_message") or normalize_error_pattern(raw_message)
-            
-            # 4. Logger / Class
-            logger_name = source.get("log", {}).get("logger_name") or ""
-            
-
-            # --- Waterfall Grouping ---
-            group_type = "Unanalyzed"
-            group_signature_string = ""
-            
-            # Check for Custom Patterns First (Priority)
-            custom_match = check_custom_patterns(raw_message, custom_patterns)
-            
-            # Check for CSP Violation first (Specific Raw Message Check)
-            csp_signature = extract_csp_signature(raw_message)
-
-            # Scenario 0: Custom Rule
-            if custom_match:
-                raw_type = custom_match.get('group_type', 'Custom')
-                if raw_type == "Custom":
-                    group_type = f"Custom: {custom_match['name']}"
-                else:
-                    group_type = raw_type
-                group_signature_string = custom_match['name']
-            
-            # Scenario 1: CSP Violation
-            elif csp_signature:
-                 group_type = "CSP Violation"
-                 group_signature_string = csp_signature
-
-            # Scenario 2: Rule Sequence
-            elif sequence_signature:
-                group_type = "RuleSequence"
-                group_signature_string = sequence_signature
-            
-            # Scenario 2: Exception Message
-            elif norm_exc_message:
-                group_type = "Exception"
-                group_signature_string = norm_exc_message
-                
-            # Scenario 3: Log Message
-            elif norm_message:
-                group_type = "Message"
-                group_signature_string = norm_message
-                
-            # Scenario 4: Logger / Class
-            else:
-                group_type = "Logger"
-                group_signature_string = logger_name if logger_name else "Unknown"
-
-            # Generate Deterministic ID
-            group_id = generate_group_id(group_signature_string)
-            now_ts = datetime.utcnow().isoformat()
-            
-            # Representative Log Structure
-            rep_log = {
-                "message": raw_message,
-                "exception_message": exc_message,
-                "logger_name": logger_name,
-                "sample_log_id": doc_id 
-            }
-
-            # --- Update Script ---
-            script_source = """
-                if (ctx._source.count == null) ctx._source.count = 0;
-                if (ctx._source.raw_log_ids == null) ctx._source.raw_log_ids = [];
-                if (ctx._source.exception_signatures == null) ctx._source.exception_signatures = [];
-                if (ctx._source.message_signatures == null) ctx._source.message_signatures = [];
-
-                ctx._source.count += params.inc;
-                if (ctx._source.last_seen == null || params.last_seen.compareTo(ctx._source.last_seen) > 0) {
-                    ctx._source.last_seen = params.last_seen;
-                }
-
-                if (ctx._source.raw_log_ids.size() < 50 && !ctx._source.raw_log_ids.contains(params.new_id)) {
-                    ctx._source.raw_log_ids.add(params.new_id);
-                }
-
-                if (params.norm_exc != null && params.norm_exc != "") {
-                    if (!ctx._source.exception_signatures.contains(params.norm_exc)) {
-                        ctx._source.exception_signatures.add(params.norm_exc);
-                    }
-                }
-
-                if (params.norm_msg != null && params.norm_msg != "") {
-                    if (!ctx._source.message_signatures.contains(params.norm_msg)) {
-                        ctx._source.message_signatures.add(params.norm_msg);
-                    }
-                }
-
-                ctx._source.representative_log = params.rep_log;
-            """
-
-            upsert_doc = {
-                "group_signature": group_signature_string,
-                "group_type": group_type,
-                "first_seen": doc_ts if doc_ts else now_ts,
-                "last_seen": doc_ts if doc_ts else now_ts,
-                "count": 1,
-                "raw_log_ids": [doc_id],
-                "exception_signatures": [norm_exc_message] if norm_exc_message else [],
-                "message_signatures": [norm_message] if norm_message else [],
-                "representative_log": rep_log,
-                "diagnosis": {
-                    "status": "PENDING"
-                }
-            }
-            
-            yield {
-                "_op_type": "update",
-                "_index": DEST_INDEX,
-                "_id": group_id,
-                "retry_on_conflict": 5,
-                "script": {
-                    "source": script_source,
-                    "lang": "painless",
-                    "params": {
-                        "inc": 1,
-                        "last_seen": doc_ts if doc_ts else now_ts,
-                        "new_id": doc_id,
-                        "rep_log": rep_log,
-                        "norm_exc": norm_exc_message,
-                        "norm_msg": norm_message
-                    }
-                },
-                "upsert": upsert_doc
-            }
-
-    # Execute Parallel Bulk
     success_count = 0
     failure_count = 0
-    conflict_count = 0
     
-    print(f"[INFO] Using {THREAD_COUNT} threads for processing...")
-    
+    print(f"[INFO] Processing logs...")
+
     with OptimizeIndexSettings(client, DEST_INDEX):
         try:
-             # Use progress bar if tqdm available, else basic print
+            # Use progress bar if available
             try:
                 from tqdm import tqdm
-                iterator = tqdm(action_generator(), unit="logs", desc="Grouping")
-                use_tqdm = True
+                iterator = tqdm(scanner, unit="logs", desc="Grouping")
             except ImportError:
-                iterator = action_generator()
-                use_tqdm = False
+                iterator = scanner
 
-            for success, info in helpers.parallel_bulk(
-                client,
-                iterator,
-                thread_count=THREAD_COUNT,
-                queue_size=THREAD_COUNT * 2,
-                chunk_size=CHUNK_SIZE,
-                raise_on_error=False,
-                raise_on_exception=False,
-                start_response_length=True # Optimization
-            ):
-                if success:
-                    success_count += 1
-                else:
-                    op_result = info.get('update') or info.get('index') or {}
-                    status = op_result.get('status')
-                    if status == 409 or "version_conflict_engine_exception" in str(info):
-                        conflict_count += 1
-                    else:
-                        failure_count += 1
-                        if failure_count < 5:
-                            print(f"\n[ERROR] Grouping failed: {info}")
+            for doc in iterator:
+                if limit and processed_count >= limit:
+                    break
+                    
+                processed_count += 1
+                source = doc['_source']
+                doc_id = doc['_id']
                 
-                if not use_tqdm and (success_count + failure_count) % 2000 == 0:
-                     print(f"Processed {success_count + failure_count} logs...", end='\r')
-                     
+                # Update local tracker
+                doc_ts = source.get('ingestion_timestamp')
+                if doc_ts:
+                    if not latest_seen_timestamp_local or doc_ts > latest_seen_timestamp_local:
+                        latest_seen_timestamp_local = doc_ts
+
+                # --- Extraction & Grouping Logic (Inlined) ---
+                sequence_summary_dict = source.get("sequence_summary", {})
+                sequence_signature = ""
+                if sequence_summary_dict and isinstance(sequence_summary_dict, dict):
+                    sorted_keys = sorted(sequence_summary_dict.keys(), key=lambda k: int(k) if k.isdigit() else 999)
+                    sequence_parts = [sequence_summary_dict[k] for k in sorted_keys]
+                    sequence_signature = " | ".join(sequence_parts)
+                
+                exc_message = source.get("exception_message") or ""
+                norm_exc_message = source.get("normalized_exception_message") or normalize_error_pattern(exc_message)
+                raw_message = source.get("log", {}).get("message") or ""
+                norm_message = source.get("normalized_message") or normalize_error_pattern(raw_message)
+                logger_name = source.get("log", {}).get("logger_name") or ""
+                
+                group_type = "Unanalyzed"
+                group_signature_string = ""
+                
+                custom_match = check_custom_patterns(raw_message, custom_patterns)
+                csp_signature = extract_csp_signature(raw_message)
+
+                if custom_match:
+                    raw_type = custom_match.get('group_type', 'Custom')
+                    if raw_type == "Custom":
+                        group_type = f"Custom: {custom_match['name']}"
+                    else:
+                        group_type = raw_type
+                    group_signature_string = custom_match['name']
+                elif csp_signature:
+                     group_type = "CSP Violation"
+                     group_signature_string = csp_signature
+                elif sequence_signature:
+                    group_type = "RuleSequence"
+                    group_signature_string = sequence_signature
+                elif norm_exc_message:
+                    group_type = "Exception"
+                    group_signature_string = norm_exc_message
+                elif norm_message:
+                    group_type = "Message"
+                    group_signature_string = norm_message
+                else:
+                    group_type = "Logger"
+                    group_signature_string = logger_name if logger_name else "Unknown"
+
+                group_id = generate_group_id(group_signature_string)
+                now_ts = datetime.utcnow().isoformat()
+                
+                rep_log = {
+                    "message": raw_message,
+                    "exception_message": exc_message,
+                    "logger_name": logger_name,
+                    "sample_log_id": doc_id 
+                }
+
+                script_source = """
+                    if (ctx._source.count == null) ctx._source.count = 0;
+                    if (ctx._source.raw_log_ids == null) ctx._source.raw_log_ids = [];
+                    if (ctx._source.exception_signatures == null) ctx._source.exception_signatures = [];
+                    if (ctx._source.message_signatures == null) ctx._source.message_signatures = [];
+
+                    ctx._source.count += params.inc;
+                    if (ctx._source.last_seen == null || params.last_seen.compareTo(ctx._source.last_seen) > 0) {
+                        ctx._source.last_seen = params.last_seen;
+                    }
+
+                    if (ctx._source.raw_log_ids.size() < 50 && !ctx._source.raw_log_ids.contains(params.new_id)) {
+                        ctx._source.raw_log_ids.add(params.new_id);
+                    }
+
+                    if (params.norm_exc != null && params.norm_exc != "") {
+                        if (!ctx._source.exception_signatures.contains(params.norm_exc)) {
+                            ctx._source.exception_signatures.add(params.norm_exc);
+                        }
+                    }
+
+                    if (params.norm_msg != null && params.norm_msg != "") {
+                        if (!ctx._source.message_signatures.contains(params.norm_msg)) {
+                            ctx._source.message_signatures.add(params.norm_msg);
+                        }
+                    }
+
+                    ctx._source.representative_log = params.rep_log;
+                """
+
+                upsert_doc = {
+                    "group_signature": group_signature_string,
+                    "group_type": group_type,
+                    "first_seen": doc_ts if doc_ts else now_ts,
+                    "last_seen": doc_ts if doc_ts else now_ts,
+                    "count": 1,
+                    "raw_log_ids": [doc_id],
+                    "exception_signatures": [norm_exc_message] if norm_exc_message else [],
+                    "message_signatures": [norm_message] if norm_message else [],
+                    "representative_log": rep_log,
+                    "diagnosis": {
+                        "status": "PENDING"
+                    }
+                }
+                
+                action = {
+                    "_op_type": "update",
+                    "_index": DEST_INDEX,
+                    "_id": group_id,
+                    "retry_on_conflict": 5,
+                    "script": {
+                        "source": script_source,
+                        "lang": "painless",
+                        "params": {
+                            "inc": 1,
+                            "last_seen": doc_ts if doc_ts else now_ts,
+                            "new_id": doc_id,
+                            "rep_log": rep_log,
+                            "norm_exc": norm_exc_message,
+                            "norm_msg": norm_message
+                        }
+                    },
+                    "upsert": upsert_doc
+                }
+                
+                actions_buffer.append(action)
+                
+                if len(actions_buffer) >= batch_size:
+                    # Flush Batch
+                    try:
+                        resp = safe_bulk(client, actions_buffer)
+                        # safe_bulk returns (success, errors) from helpers.bulk
+                        success, errors = resp
+                        success_count += success
+                        if errors:
+                             failure_count += len(errors)
+                    except Exception as e:
+                        print(f"[ERROR] Batch failed: {e}")
+                        failure_count += len(actions_buffer)
+                        
+                    actions_buffer = []
+
+            # Flush remaining
+            if actions_buffer:
+                try:
+                    success, errors = safe_bulk(client, actions_buffer)
+                    success_count += success
+                    if errors:
+                         failure_count += len(errors)
+                except Exception as e:
+                    print(f"[ERROR] Final batch failed: {e}")
+                    failure_count += len(actions_buffer)
+
         except Exception as e:
-            print(f"\n[ERROR] Critical failure in grouping loop: {e}")
+            print(f"\n[ERROR] Critical failure in scanning loop: {e}")
 
     print(f"\n[INFO] grouping complete.")
     print(f"  Processed: {processed_count}")
     print(f"  Updates/Upserts: {success_count}")
-    print(f"  Conflicts: {conflict_count}")
     print(f"  Failures: {failure_count}")
 
-    # Update Checkpoint
-    latest_seen_timestamp = latest_tracker[0]
-    if latest_seen_timestamp and latest_seen_timestamp != last_checkpoint:
-        update_checkpoint(client, latest_seen_timestamp)
-        print(f"[INFO] Checkpoint updated to: {latest_seen_timestamp}")
+    # Update Checkpoint using local tracker
+    if latest_seen_timestamp_local and latest_seen_timestamp_local != last_checkpoint:
+        update_checkpoint(client, latest_seen_timestamp_local)
+        print(f"[INFO] Checkpoint updated to: {latest_seen_timestamp_local}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pega Log Grouper (OpenSearch)")

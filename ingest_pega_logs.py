@@ -1,5 +1,6 @@
 import os
 import json
+import io
 import time
 import uuid
 import re
@@ -24,11 +25,15 @@ OPENSEARCH_PASS = os.getenv("OPENSEARCH_PASS")
 INDEX_NAME = os.getenv("INDEX_NAME", "pega-logs")
 
 # Tunable settings
-# Tunable settings
-CHUNK_SIZE = int(os.getenv("BULK_CHUNK_SIZE", "2500")) # Increased for throughput
+# Optimized for stability and speed based on user request (t3.small)
+CHUNK_SIZE = int(os.getenv("BULK_CHUNK_SIZE", "2500"))  # Aggressive batch size
+MAX_CHUNK_BYTES = 20 * 1024 * 1024  # 20 MB limit
 CLIENT_TIMEOUT = int(os.getenv("OPENSEARCH_TIMEOUT", "120"))
-THREAD_COUNT = int(os.getenv("INGESTION_THREADS", "8"))
-CLIENT_TIMEOUT = int(os.getenv("OPENSEARCH_TIMEOUT", "120"))
+THREAD_COUNT = int(os.getenv("INGESTION_THREADS", "8"))  # Aggressive threading
+MAX_RETRIES = 3
+QUEUE_SIZE = 6
+MAX_RETRY_QUEUE = 50000  # Hard cap for memory safety
+
 
 def get_opensearch_client():
     """Create and return OpenSearch client."""
@@ -43,12 +48,91 @@ def get_opensearch_client():
         verify_certs=False,
         ssl_show_warn=False,
         timeout=CLIENT_TIMEOUT,
-        max_retries=5,
+
+        max_retries=10,
         retry_on_timeout=True,
         retry_on_status=(429, 500, 502, 503, 504),
     )
 
-# --- Optimization Helpers ---
+def retry_failed_docs(client, retry_docs):
+    """
+    Retry failed documents with exponential backoff.
+    Returns (success_count, failed_docs).
+    """
+    backoff = 1
+    current_docs = retry_docs
+    total_retry_success = 0
+    
+    for attempt in range(MAX_RETRIES):
+        if not current_docs:
+            return total_retry_success, []
+            
+        print(f"[RETRY] Attempt {attempt+1}/{MAX_RETRIES} for {len(current_docs)} docs")
+        next_retry_queue = []
+        batch_success = 0
+        
+        # Sanitize docs: Ensure _index and _op_type are present
+        safe_docs = []
+        for doc in current_docs:
+            if isinstance(doc, dict):
+                # If doc is missing key metadata, re-add it
+                if "_index" not in doc:
+                    doc["_index"] = "pega-logs" # Assume default index
+                
+                doc["_index"] = doc.get("_index", "pega-logs") 
+                doc["_op_type"] = doc.get("_op_type", "index")
+                
+                # Check if it's a raw source doc (no underscore keys)
+                if not any(k.startswith("_") for k in doc.keys()):
+                     # It is likely a source document. Wrap it.
+                     safe_docs.append({
+                         "_index": "pega-logs",
+                         "_op_type": "index",
+                         "_source": doc
+                     })
+                     continue
+
+            safe_docs.append(doc)
+            
+        # We use streaming_bulk to match results to inputs (preserves order)
+        try:
+            results_iter = helpers.streaming_bulk(
+                client,
+                safe_docs,
+                raise_on_error=False,
+                request_timeout=120,
+                chunk_size=500 # Smaller chunk for retries
+            )
+            
+            # Iterate safely
+            for (success, info), original_doc in zip(results_iter, current_docs):
+                if success:
+                    batch_success += 1
+                else:
+                    action = info.get("create") or info.get("index") or {}
+                    status = action.get("status")
+                    
+                    if status in (429, 500, 502, 503, 504):
+                        # Transient error, retry next time
+                        next_retry_queue.append(original_doc)
+                    else:
+                        # Permanent error (400, 409 etc), log and drop
+                        print(f"[RETRY ERROR] Permanent failure status {status}: {info}")
+            
+            total_retry_success += batch_success
+
+        except Exception as e:
+            print(f"[WARN] Exception during retry batch: {e}")
+            # If batch fails hard, retry all current_docs (optimistic)
+            next_retry_queue = current_docs
+            
+        current_docs = next_retry_queue
+        
+        if current_docs:
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 10)
+            
+    return total_retry_success, current_docs
 
 class OptimizeIndexSettings:
     """Context manager to optimize index settings for bulk ingestion."""
@@ -60,16 +144,7 @@ class OptimizeIndexSettings:
     def __enter__(self):
         print(f"[INFO] Optimizing index settings for {self.index_name}...")
         try:
-            # save current settings (refresh_interval, number_of_replicas)
-            # We fetch all settings, but we only really care about these two being restored if they were explicitly set.
-            # For simplicity, we assume we want to restore to '1s' and '1' (or '0' if single node) defaults if not found.
-            settings = self.client.indices.get_settings(index=self.index_name)
-            idx_settings = settings.get(self.index_name, {}).get('settings', {}).get('index', {})
-            
-            self.original_settings['refresh_interval'] = idx_settings.get('refresh_interval', '1s')
-            self.original_settings['number_of_replicas'] = idx_settings.get('number_of_replicas', '1')
-            
-            # Apply optimizations
+            # We minimize load by disabling refresh and replicas
             self.client.indices.put_settings(index=self.index_name, body={
                 "index": {
                     "refresh_interval": "-1",
@@ -83,11 +158,11 @@ class OptimizeIndexSettings:
     def __exit__(self, exc_type, exc_val, exc_tb):
         print(f"[INFO] Restoring index settings for {self.index_name}...")
         try:
-            # Restore
+            # Restore to standard production readiness
             self.client.indices.put_settings(index=self.index_name, body={
                 "index": {
-                    "refresh_interval": self.original_settings.get('refresh_interval', '1s'),
-                    "number_of_replicas": self.original_settings.get('number_of_replicas', 1)
+                    "refresh_interval": "1s",
+                    "number_of_replicas": 1
                 }
             })
             # Force a refresh so data is visible immediately after
@@ -305,12 +380,13 @@ def ensure_index(client):
         # We might want to update mapping here if needed, but for now just assume it exists
         print(f"Index already exists: {INDEX_NAME}")
 
-def ingest_single_file(file_path: str):
-    """Ingest a single file into OpenSearch (internal helper)."""
+def ingest_log_stream(file_name: str, line_iterator):
+    """
+    Core ingestion logic that reads lines from an iterator (file or stream).
+    """
     client = get_opensearch_client()
     ensure_index(client)
     
-    file_name = os.path.basename(file_path)
     session_id = str(uuid.uuid4())
     ingestion_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     
@@ -318,17 +394,27 @@ def ingest_single_file(file_path: str):
     ignored_local = 0
     
     def actions():
-        nonlocal ignored_local
+        nonlocal ignored_local, ingestion_ts
         line_number = 0
         
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            for raw_line in f:
+        for raw_line in line_iterator:
                 line_number += 1
+                if line_number % 50000 == 0:
+                     print(f"[SCAN] Scanned {line_number} lines...", end='\r')
+
                 line = raw_line.strip()
                 if not line:
                     continue
 
                 try:
+                    # --- FAST FILTER (Pre-JSON) ---
+                    # Optimization: Check for Error/Exception keywords in raw string first
+                    # This saves expensive JSON parsing for 95% of INFO/DEBUG logs
+                    raw_upper = line.upper()
+                    if not ("ERROR" in raw_upper or "FATAL" in raw_upper or "FAIL" in raw_upper or "EXCEPTION" in raw_upper or "STACK" in raw_upper):
+                         continue
+                    # ------------------------------
+
                     # Attempt to parse as JSON
                     log_entry = json.loads(line)
                     
@@ -345,6 +431,19 @@ def ingest_single_file(file_path: str):
                     
                     # 1. Extract and Parse Stack Trace
                     stack_trace = extract_stacktrace_from_log_entry(log_entry)
+                    
+                    # --- FILTERING: Only Index Errors ---
+                    # Logic: Check level or presence of exception/stacktrace
+                    log_lvl = log_entry.get("level") or log_entry.get("log", {}).get("level") or ""
+                    log_lvl = str(log_lvl).upper()
+                    
+                    is_error = "ERROR" in log_lvl or "FATAL" in log_lvl or "FAIL" in log_lvl
+                    has_exception = stack_trace is not None or "exception" in log_entry.get("log", {})
+                    
+                    if not (is_error or has_exception):
+                        continue # Skip non-error logs
+                    # ------------------------------------
+
                     sequence_summary = {}
                     generated_rule_lines_found = 0
                     total_lines_in_stack = 0
@@ -408,7 +507,8 @@ def ingest_single_file(file_path: str):
     # Track stats
     success_count = 0
     failure = 0
-    duplicates = 0  # Track duplicates
+    duplicates = 0
+    retry_queue = []
     
     # Try to import tqdm for progress bar
     try:
@@ -425,17 +525,25 @@ def ingest_single_file(file_path: str):
         if use_tqdm:
             iterator = tqdm(iterator, unit="lines", desc="Ingesting")
             
-        # Use parallel_bulk for high throughput
+        # Use OptimizeIndexSettings for context
         with OptimizeIndexSettings(client, INDEX_NAME):
+            
+            # Adaptive backpressure variables
+            backoff = 0.1
+            
+            # Switch to parallel_bulk for maximum throughput as requested
+            # We rely on client-side max_retries=10 for reliability
             for success, info in helpers.parallel_bulk(
                 client,
                 iterator,
                 thread_count=THREAD_COUNT,
-                queue_size=THREAD_COUNT * 2,
+                queue_size=THREAD_COUNT + 2, 
                 chunk_size=CHUNK_SIZE,
+                max_chunk_bytes=MAX_CHUNK_BYTES, 
                 raise_on_error=False,
                 raise_on_exception=False,
                 request_timeout=CLIENT_TIMEOUT,
+
             ):
                 if success:
                     success_count += 1
@@ -444,10 +552,38 @@ def ingest_single_file(file_path: str):
                     op_result = info.get('create') or info.get('index') or {}
                     status_code = op_result.get('status')
                     
+                    # No backoff/sleep here - firehose mode as requested
+
                     if status_code == 409:
                         duplicates += 1
+                    elif status_code in (429, 500, 502, 503, 504):
+                        # RETRY LOGIC
+                        # With streaming_bulk, op_result often contains 'data' if error occurred?
+                        # Or we are just iterating and can't easily peek 'original' from iterator unless we zip.
+                        # However, for 429 errors from streaming_bulk, the 'data' field is usually populated.
+                        original_doc = op_result.get('data')
+                        if original_doc:
+                             # Check queue size cap
+                             if len(retry_queue) >= MAX_RETRY_QUEUE:
+                                 if len(retry_queue) == MAX_RETRY_QUEUE:
+                                     print("\n[WARN] Retry queue full! Flushing to disk to prevent OOM.")
+                                     # Flush immediately to disk
+                                     with open("failed_docs.jsonl", "a", encoding="utf-8") as f:
+                                         for d in retry_queue:
+                                             f.write(json.dumps(d) + "\n")
+                                     retry_queue = [] # Clear memory
+                                 
+                                 # Write current one too
+                                 with open("failed_docs.jsonl", "a", encoding="utf-8") as f:
+                                     f.write(json.dumps(original_doc) + "\n")
+                                 failure += 1
+                             else:
+                                 retry_queue.append(original_doc)
+                        else:
+                             print(f"[ERROR] Could not recover doc for retry (Status {status_code})")
+                             failure += 1
                     else:
-                        # Log sample errors even with tqdm
+                        # Permanent failure
                         if failure < 5:
                              print(f"\n[ERROR] Failed doc (Status {status_code}): {info}")
                         failure += 1
@@ -455,6 +591,33 @@ def ingest_single_file(file_path: str):
                 # Periodic print if no tqdm
                 if not use_tqdm and (success_count + duplicates + failure) % 5000 == 0:
                     print(f"Processed {success_count + duplicates + failure} lines...", end='\r')
+        
+        # --- Stage 2: Retry Failed Docs ---
+        if retry_queue:
+            print(f"\n[INFO] Retrying {len(retry_queue)} failed documents...")
+            retry_success, final_failed = retry_failed_docs(client, retry_queue)
+            
+            # Update stats logic:
+            # Those that succeeded in retry are now successes.
+            success_count += retry_success
+            
+            if final_failed:
+                print(f"[WARN] {len(final_failed)} documents failed permanently after retries.")
+                failure += len(final_failed)
+                
+                # Persist to disk
+                with open("failed_docs.jsonl", "a", encoding="utf-8") as f:
+                    for doc in final_failed:
+                        f.write(json.dumps(doc) + "\n")
+                print(f"[INFO] Written failed docs to failed_docs.jsonl")
+            else:
+                print(f"[INFO] All {retry_success} retries successful!")
+                
+            # IMPORTANT: We already captured duplicates/failures in the main loop differently.
+            # But the 'retry_queue' items were originally counted as nothing (they were pending).
+            # So adding success count is correct.
+            # The failure count was NOT incremented for them yet.
+            # So incrementing failure by len(final_failed) is correct.
 
     except Exception as e:
         print(f"Bulk indexing error: {e}")
@@ -470,6 +633,16 @@ def ingest_single_file(file_path: str):
         "ignored": ignored_local,
         "file_name": file_name
     }
+
+def ingest_single_file(file_path: str):
+    """Ingest a single file from disk."""
+    file_name = os.path.basename(file_path)
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            return ingest_log_stream(file_name, f)
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+        return {"status": "error", "message": str(e)}
 
 def ingest_file(file_path: str):
     """Ingest a file (or ZIP of files) into OpenSearch."""
@@ -488,49 +661,153 @@ def ingest_file(file_path: str):
             "files_processed": []
         }
         
-        # Create temp dir
-        with tempfile.TemporaryDirectory() as temp_dir:
-            try:
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                
-                # Walk through extracted files
-                for root, dirs, files in os.walk(temp_dir):
-                    for file in files:
-                        full_path = os.path.join(root, file)
-                        # Skip hidden files or non-logs if desired, but we'll try everything that looks like text
-                        # Or strictly: if file.endswith(".log") or file.endswith(".json") or file.endswith(".txt"):
-                        
-                        print(f"Processing extracted file: {file}")
-                        res = ingest_single_file(full_path)
-                        
-                        aggregated_result["total_indexed"] += res.get("total_indexed", 0)
-                        aggregated_result["failed"] += res.get("failed", 0)
-                        aggregated_result["duplicates_skipped"] += res.get("duplicates_skipped", 0)
-                        aggregated_result["ignored"] += res.get("ignored", 0)
-                        aggregated_result["files_processed"].append(file)
-                
-                print(f"ZIP Ingestion Complete. Processed {len(aggregated_result['files_processed'])} files.")
-                return aggregated_result
-                
-            except Exception as e:
-                print(f"Error processing ZIP: {e}")
-                return {"status": "error", "message": str(e)}
+        try:
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                # Iterate over files in the ZIP
+                for zip_info in zip_ref.infolist():
+                    if zip_info.is_dir():
+                        continue
+                    
+                    # Optional: Filter for likely log files if needed
+                    # if not (zip_info.filename.endswith('.log') or zip_info.filename.endswith('.json')): continue
+                    
+                    print(f"Processing ZIP entry: {zip_info.filename}")
+                    
+                    # Open the file as a stream
+                    with zip_ref.open(zip_info) as binary_file:
+                        # Wrap in TextIOWrapper to read as text (utf-8)
+                        with io.TextIOWrapper(binary_file, encoding='utf-8', errors='ignore') as text_file:
+                            res = ingest_log_stream(zip_info.filename, text_file)
+                            
+                            aggregated_result["total_indexed"] += res.get("total_indexed", 0)
+                            aggregated_result["failed"] += res.get("failed", 0)
+                            aggregated_result["duplicates_skipped"] += res.get("duplicates_skipped", 0)
+                            aggregated_result["ignored"] += res.get("ignored", 0)
+                            aggregated_result["files_processed"].append(zip_info.filename)
+            
+            print(f"ZIP Ingestion Complete. Processed {len(aggregated_result['files_processed'])} files.")
+            return aggregated_result
+            
+        except Exception as e:
+            print(f"Error processing ZIP: {e}")
+            return {"status": "error", "message": str(e)}
     else:
         # Regular single file
         return ingest_single_file(file_path)
 
+def ingest_failed_docs(file_path: str):
+    """
+    Ingest failed documents from a JSONL file with duplicate prevention.
+    Generates deterministic IDs based on content hash.
+    """
+    print(f"Starting RETRY ingestion from: {file_path}")
+    client = get_opensearch_client()
+    ensure_index(client)
+    
+    def retry_actions():
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f):
+                line = line.strip()
+                if not line: continue
+                try:
+                    doc = json.loads(line)
+                    
+                    # Sanitize: Ensure proper structure
+                    # If it's a raw doc (no underscores), wrap it or treat as source
+                    # But failed_docs.jsonl usually writes the raw doc OR the action structure?
+                    # Let's inspect failed_docs.jsonl format from earlier code:
+                    # It writes `json.dumps(original_doc)` where `original_doc` came from `op_result.get('data')`
+                    # In `parallel_bulk` (which we use), `data` is usually the original source doc provided to it.
+                    # So we treat it as the source doc.
+                    
+                    source_doc = doc
+                    
+                    # Remove internal fields if they exist from previous attempts (just in case)
+                    # e.g. if we accidentally saved metadata wrapped docs
+                    if "_source" in doc and "_index" in doc:
+                         source_doc = doc["_source"]
+
+                    # Deterministic ID for Idempotency
+                    # Sort keys to ensure consistent string representation
+                    doc_str = json.dumps(source_doc, sort_keys=True)
+                    doc_id = hashlib.md5(doc_str.encode('utf-8')).hexdigest()
+                    
+                    yield {
+                        "_op_type": "create", # 'create' ensures we don't overwrite if ID collision (though unlikely) or if already exists
+                        "_index": INDEX_NAME,
+                        "_id": doc_id,
+                        "_source": source_doc
+                    }
+                except Exception as e:
+                    print(f"Skipping bad line {line_num}: {e}")
+
+    # Use parallel bulk for speed
+    success_count = 0
+    failure_count = 0
+    duplicates = 0
+    
+    # Try to import tqdm
+    try:
+        from tqdm import tqdm
+        iterator = tqdm(retry_actions(), desc="Retrying")
+    except ImportError:
+        iterator = retry_actions()
+
+    with OptimizeIndexSettings(client, INDEX_NAME):
+        for success, info in helpers.parallel_bulk(
+            client,
+            iterator,
+            thread_count=THREAD_COUNT,
+            chunk_size=CHUNK_SIZE,
+            raise_on_error=False,
+            raise_on_exception=False,
+            request_timeout=CLIENT_TIMEOUT
+        ):
+            if success:
+                success_count += 1
+            else:
+                action = info.get('create') or info.get('index') or {}
+                status = action.get('status')
+                if status == 409:
+                    duplicates += 1
+                else:
+                    failure_count += 1
+                    # print(f"[RETRY FAIL] {info}") # access denied often noisy for 409s if not handled
+
+    print(f"\nRetry Complete.")
+    return {
+        "status": "success",
+        "retried_indexed": success_count,
+        "failed_again": failure_count,
+        "duplicates_skipped": duplicates,
+        "file": file_path
+    }
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Ingest Pega logs with stack trace parsing")
-    parser.add_argument("file", help="Path to log file")
+    parser.add_argument("file", nargs="?", help="Path to log file (for standard ingestion)")
+    parser.add_argument("--retry-file", help="Path to failed_docs.jsonl to retry ingestion")
     args = parser.parse_args()
     
-    if os.path.exists(args.file):
-        start_time = time.time()
-        result = ingest_file(args.file)
-        duration = time.time() - start_time
-        print(f"Time taken: {duration:.2f} seconds")
-        print(json.dumps(result, indent=2))
+    if args.retry_file:
+         if os.path.exists(args.retry_file):
+             start_time = time.time()
+             result = ingest_failed_docs(args.retry_file)
+             duration = time.time() - start_time
+             print(f"Time taken: {duration:.2f} seconds")
+             print(json.dumps(result, indent=2))
+         else:
+             print(f"Retry file not found: {args.retry_file}")
+             
+    elif args.file:
+        if os.path.exists(args.file):
+            start_time = time.time()
+            result = ingest_file(args.file)
+            duration = time.time() - start_time
+            print(f"Time taken: {duration:.2f} seconds")
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"File not found: {args.file}")
     else:
-        print(f"File not found: {args.file}")
+        parser.print_help()

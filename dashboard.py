@@ -310,6 +310,32 @@ def update_document_status(client, doc_id, new_status):
         st.error(f"Error updating status: {e}")
         return False
 
+def fetch_group_samples(client, group_id, max_samples=5):
+    """Fetch sample raw logs for a group ID."""
+    try:
+        # 1. Get Group Doc to find raw IDs
+        group_doc = client.get(index="pega-analysis-results", id=group_id)
+        raw_ids = group_doc["_source"].get("raw_log_ids", [])
+        
+        if not raw_ids:
+            return []
+            
+        # 2. Get Raw Logs
+        # Slice to max_samples
+        target_ids = raw_ids[:max_samples]
+        
+        # Using mget to retrieve docs by ID
+        response = client.mget(index="pega-logs", body={"ids": target_ids})
+        
+        samples = []
+        for doc in response.get("docs", []):
+            if doc.get("found"):
+                samples.append(doc["_source"])
+                
+        return samples
+    except Exception as e:
+        return []
+
 def backup_analysis_status(client):
     """
     Backup diagnosis statuses before deletion.
@@ -908,8 +934,47 @@ elif page == "Grouping Studio":
         df_details = fetch_detailed_table_data(client, size=1000)
         
         if not df_details.empty:
+            # --- Selection State Management ---
+            # Toggle for "Select All" / "Deselect All"
+            if "grouping_editor_key" not in st.session_state:
+                st.session_state.grouping_editor_key = 0
+            if "select_all_state" not in st.session_state:
+                 st.session_state.select_all_state = None # None, True, False
+
+            # Buttons Row
+            b1, b2, b3 = st.columns([1, 1, 6])
+            with b1:
+                if st.button("Select All", type="primary"):
+                    st.session_state.select_all_state = True
+                    st.session_state.grouping_editor_key += 1
+                    st.rerun()
+            with b2:
+                if st.button("Deselect All"):
+                    st.session_state.select_all_state = False
+                    st.session_state.grouping_editor_key += 1
+                    st.rerun()
+
+            # Apply Bulk Selection State if triggered
+            # We insert the column with the forced value if state was just toggled
+            # Note: data_editor edits will override this on subsequent runs if key doesn't change
+            # But we increment key on button click, so it re-initializes from this df.
+            default_select = False
+            if st.session_state.select_all_state is not None:
+                default_select = st.session_state.select_all_state
+                # Reset state so individual toggles work afterwards? 
+                # Actually, if we keep reusing this DF logic, it might reset user edits on other interactions.
+                # So we only want to force it when the key increments.
+                # Since key increments ONLY on button click, this logic holds for that render.
+                # For normal interactions (no button click), select_all_state persists but key is same.
+                # Ideally, we should set it to None after use, but we need it for the render.
+                # Let's just use the boolean. 
+            
             # Add Select Column
-            df_details.insert(0, "Select", False)
+            # If we are re-rendering with a new key, this column value effectively resets the editor state
+            df_details.insert(0, "Select", default_select)
+            
+            # Add Inspect Column
+            df_details.insert(1, "Inspect", False)
 
             # Client-side Filtering based on Search Query
             if search_query:
@@ -930,11 +995,13 @@ elif page == "Grouping Studio":
             all_options = list(dict.fromkeys(standard_options + existing_statuses))
 
             # Render Table exactly like Dashboard but with Select column
+            # Use dynamic key to force reset on Select All/Deselect All
             edited_df = st.data_editor(
                 filtered_df,
                 width="stretch",
                 column_config={
                     "Select": st.column_config.CheckboxColumn(required=True),
+                    "Inspect": st.column_config.CheckboxColumn(help="Check to view detailed logs below", default=False),
                     "doc_id": None, 
                     "last_seen": st.column_config.DatetimeColumn("Last Seen", format="D MMM YYYY, h:mm a"),
                     "count": st.column_config.ProgressColumn("Count", format="%d", min_value=0, max_value=int(df_details['count'].max())),
@@ -950,9 +1017,58 @@ elif page == "Grouping Studio":
                 disabled=["last_seen", "group_signature", "group_type", "count", "display_rule", 
                           "exception_summary", "message_summary", "logger_name", "diagnosis.report"],
                 hide_index=True,
-                key="grouping_selector_table"
+                key=f"grouping_selector_table_{st.session_state.grouping_editor_key}"
             )
 
+            # --- DETAILED VIEW LOGIC ---
+            # Check if any row has "Inspect" checked
+            inspected_rows = edited_df[edited_df["Inspect"]]
+            if not inspected_rows.empty:
+                st.divider()
+                st.subheader("🔍 Detailed Group Inspection")
+                
+                # Show first selected group
+                row = inspected_rows.iloc[0]
+                group_id = row['doc_id']
+                
+                c1, c2 = st.columns([2, 1])
+                with c1:
+                    st.markdown(f"**Rule/Message**: `{row['display_rule']}`")
+                    st.markdown(f"**Group Type**: {row['group_type']}")
+                    st.markdown(f"**Signature**: `{row['group_signature']}`")
+                with c2:
+                    st.metric("Total Count", row['count'])
+                    st.metric("Status", row['diagnosis.status'])
+
+                # Fetch Samples
+                st.markdown("### 📄 Sample Logs")
+                with st.spinner("Fetching raw sample logs..."):
+                    samples = fetch_group_samples(client, group_id)
+                
+                if samples:
+                    tabs = st.tabs([f"Log #{i+1}" for i in range(len(samples))])
+                    for i, sample in enumerate(samples):
+                        with tabs[i]:
+                            # Display pretty JSON or formatted message
+                            msg = sample.get('log', {}).get('message', 'N/A')
+                            exc = sample.get('exception_message', 'N/A')
+                            stack = sample.get('stack_trace', [])
+                            
+                            st.code(msg, language="text")
+                            if exc != 'N/A':
+                                st.error(f"Exception: {exc}")
+                            
+                            if stack:
+                                st.warning("Stack Trace Available")
+                                with st.expander("View Stack Trace"):
+                                    st.code("\n".join(stack), language="java")
+                                    
+                            with st.expander("Full JSON Metadata"):
+                                st.json(sample)
+                else:
+                    st.warning("No raw sample logs found linked to this group (stats-only group or data retention issue).")
+
+            # --- SELECTION & GROUPING LOGIC ---
             # Get Selected Rows
             selected_rows = edited_df[edited_df["Select"]]
             
@@ -1156,6 +1272,7 @@ elif page == "Grouping Studio":
                      progress_bar.empty()
 
             else:
-                st.warning("No logs found matching query.")
+                pass 
+                # st.warning("No logs found matching query.")
                         
 
