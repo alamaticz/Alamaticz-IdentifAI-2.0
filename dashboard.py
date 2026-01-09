@@ -892,7 +892,11 @@ elif page == "Chat Agent":
                         except StopAsyncIteration:
                             break
                         except Exception as e:
-                            st.error(f"Streaming error: {e}")
+                            err_msg = f"Streaming error: {e}"
+                            if hasattr(e, 'exceptions'):
+                                for idx, sub_e in enumerate(e.exceptions):
+                                    err_msg += f"\nSub-exception {idx+1}: {sub_e} (Type: {type(sub_e).__name__})"
+                            st.error(err_msg)
                             break
 
                 # Execute streaming using the wrapper
