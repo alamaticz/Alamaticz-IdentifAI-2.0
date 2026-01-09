@@ -14,6 +14,7 @@ async def initialize_agent_executor(memory=None):
     Initializes and returns an AgentExecutor connected to the OpenSearch MCP server.
     """
     mcp_url = os.getenv("MCP_SERVER_URL", "http://localhost:9900/sse")
+    print(f"[DEBUG] MCP_SERVER_URL: {mcp_url}")
     
     # Connect to OpenSearch MCP
     mcp_server_config = {
