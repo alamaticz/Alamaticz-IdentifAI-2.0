@@ -7,7 +7,7 @@ langchain==0.3.27
 langchain-core>=0.3.76
 langchain-openai>=0.3.1
 langchain-community>=0.3.15
-langchain-mcp-adapters
+langchain-mcp-adapters==0.1.11
 nest_asyncio
 tqdm
 mcp-server-opensearch
