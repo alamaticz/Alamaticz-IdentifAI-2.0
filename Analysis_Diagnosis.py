@@ -138,7 +138,7 @@ async def run_diagnosis_workflow():
     # 2. Define MCP Server URL
     mcp_server_config = {
         "opensearch": { 
-            "url": "http://localhost:9900/sse",
+            "url": os.getenv("MCP_SERVER_URL", "http://localhost:9900"),
             "transport": "sse",
             "headers": {
                 "Content-Type": "application/json",
@@ -242,6 +242,12 @@ async def run_diagnosis_workflow():
             
     except Exception as e:
         print(f"Error in diagnosis workflow: {e}")
+        import traceback
+        traceback.print_exc()
+        # Handle TaskGroup exceptions explicitly if present
+        if hasattr(e, 'exceptions'):
+            for sub_exc in e.exceptions:
+                print(f"Sub-exception: {sub_exc}")
 
 if __name__ == "__main__":
     asyncio.run(run_diagnosis_workflow())
