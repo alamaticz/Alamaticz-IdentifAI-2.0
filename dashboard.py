@@ -1128,10 +1128,14 @@ elif page == "Grouping Studio":
                                     "regex_pattern": "The UPDATED python regex (matching old + new) OR a completely NEW regex"
                                 }}
                                 
-                                **Rules**:
-                                1. If modifying an existing regex, ensure it still matches the original intent but is broad enough for the new logs.
-                                2. Use `.*` or `[\d]+` for variable parts.
-                                3. Keep static parts exact.
+                                **Critical Rules for Regex Generation**:
+                                1. **Do NOT use placeholders** like `[DATE]`, `[FILE_PATH]`, or `[ID]`. You must use valid regex for them (e.g., `.*?`, `\d+`, `\d{4}-\d{2}-\d{2}`).
+                                2. **Target Raw Logs**: The input examples you see might be "Normalized Signatures", but your regex must match the **RAW LOG LINES**.
+                                   - Raw logs often start with a timestamp (e.g., `2024-01-01 10:00:00 ERROR...`).
+                                   - **DO NOT** start your regex with `^` unless you explicitly include the timestamp pattern at the start.
+                                   - Ideally, **start with `.*`** or just the unanchored text to match broadly within the message.
+                                3. **Variable Parts**: Use `.*` or `[\d]+` for any dynamic values (IDs, Dates, Paths).
+                                4. **Keep Static Parts Exact**: Match the constant error text precisely to avoid false positives.
                                 """
                             )
                             chain = prompt | llm | StrOutputParser()
