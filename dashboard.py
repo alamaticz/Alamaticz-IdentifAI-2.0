@@ -647,8 +647,9 @@ if page == "Dashboard":
                 with st.spinner("Running AI Diagnosis... (This may take a minute)"):
                     try:
                         import subprocess
+                        import sys
                         # Run the diagnosis script as a separate process
-                        result = subprocess.run(["python", "Analysis_Diagnosis.py"], capture_output=True, text=True)
+                        result = subprocess.run([sys.executable, "Analysis_Diagnosis.py"], capture_output=True, text=True)
                         if result.returncode == 0:
                             st.success("Diagnosis Complete!")
                             with st.expander("View Analysis Logs"):
