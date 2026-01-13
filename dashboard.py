@@ -1255,17 +1255,32 @@ elif page == "Grouping Studio":
                              st.warning(f"Retry step failed: {e}")
                          time.sleep(0.5)
 
-                    # 3. Run Grouper (Optimized)
-                    status_text.text("Step 3/4: Running new grouping analysis (this may take a minute)...")
+                    # 3. Run Grouper (Optimized Parallel)
+                    status_text.text("Step 3/4: Running new grouping analysis (Parallel x4)...")
                     
                     try:
-                        from log_grouper import process_logs
+                        import subprocess
+                        import sys
                         
-                        # Capture stdout/stderr if needed, or just let it print to console logs
-                        # For blocking UI, we can just run it.
-                        process_logs(ignore_checkpoint=True, batch_size=2000)
+                        # Use subprocess to run the parallel version
+                        # equivalent to: python log_grouper.py --ignore-checkpoint --workers 4
+                        cmd = [
+                            sys.executable, 
+                            "log_grouper.py", 
+                            "--ignore-checkpoint", 
+                            "--workers", "4",
+                            "--batch-size", "1000"
+                        ]
                         
-                        progress_bar.progress(75)
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        
+                        if result.returncode != 0:
+                             st.error(f"Grouping Script Failed:\n{result.stderr}")
+                             # If it failed, we shouldn't continue to restore potentially
+                             st.stop()
+                        else:
+                             # print(result.stdout) # Optional debug
+                             progress_bar.progress(75)
 
                         # 4. Restore
                         status_text.text("Step 4/4: Restoring manual status labels...")
