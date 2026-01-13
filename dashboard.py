@@ -336,8 +336,11 @@ def fetch_group_samples(client, group_id, max_samples=5):
 @st.dialog("🔍 Detailed Group Inspection", width="large")
 def show_inspection_dialog(group_id, row_data, client):
     """
-    Dialog to show detailed inspection of a group.
+    Dialog to show detailed inspection of a group with Diagnosis capabilities.
     """
+    import asyncio
+    from Analysis_Diagnosis import diagnose_single_group, construct_analysis_context
+
     c1, c2 = st.columns([2, 1])
     with c1:
         st.markdown(f"**Rule/Message**: `{row_data.get('display_rule', 'N/A')}`")
@@ -345,17 +348,108 @@ def show_inspection_dialog(group_id, row_data, client):
         st.markdown(f"**Signature**: `{row_data.get('group_signature', 'N/A')}`")
     with c2:
         st.metric("Total Count", row_data.get('count', 0))
-        st.metric("Status", row_data.get('diagnosis.status', 'N/A'))
+        
+        # Editable Status
+        current_status = row_data.get('diagnosis.status', 'PENDING')
+        status_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "COMPLETED"]
+        
+        # Ensure current status is in options
+        if current_status not in status_options:
+            status_options.append(current_status)
+            
+        new_status = st.selectbox("Status", options=status_options, index=status_options.index(current_status), key="dialog_status_select")
+        
+        if new_status != current_status:
+            if update_document_status(client, group_id, new_status):
+                st.success(f"Status updated to {new_status}")
+                time.sleep(1)
+                st.rerun()
 
     st.divider()
 
-    # Diagnosis Report
-    report = row_data.get('diagnosis.report')
-    if report and report != 'N/A':
-        st.markdown("### 🧠 AI Diagnosis Report")
+    # --- Diagnosis Section ---
+    st.markdown("### 🧠 AI Diagnosis")
+    
+    # 1. Show Analysis Context (What data goes to LLM)
+    with st.expander("ℹ️ View Analysis Context (Data sent to AI)", expanded=False):
+        # We need to reconstruct the context (simplified) or fetch the doc again to be sure
+        # Using row_data is a good approximation but construct_analysis_context expects the full _source format
+        # Let's verify if row_data has enough or if we should just use what we have.
+        # row_data is from the dataframe, which is flattened.
+        # Ideally we fetch the "latest" document to get full non-truncated fields if needed, 
+        # but for performance let's try to reconstruct from what we have or fetch light doc.
+        try:
+             # Fast fetch of single doc source for accurate context Preview
+             fresh_doc = client.get(index="pega-analysis-results", id=group_id)
+             if fresh_doc and '_source' in fresh_doc:
+                 context_preview = construct_analysis_context(fresh_doc['_source'])
+                 st.json(context_preview)
+             else:
+                 st.warning("Could not fetch fresh context.")
+        except Exception as e:
+            st.warning(f"Could not load context: {e}")
+
+    # Defaults
+    default_prompt = """You are a Senior Pega Lead System Architect (LSA). 
+Analyze the provided error group data.
+Output a report in CLEAN PLAIN TEXT (No markdown).
+Sections: EXECUTIVE SUMMARY, SEVERITY, ERROR FLOW, ROOT CAUSE, IMPACT, RESOLUTION."""
+
+    with st.expander("📝 Edit Diagnosis Prompt", expanded=False):
+        user_prompt = st.text_area("Prompt Template", value=default_prompt, height=150, help="Use {context_str} to inject data, otherwise it's appended.")
+
+    col_btn, col_res = st.columns([1, 4])
+    
+    with col_btn:
+        if st.button("🚀 Analyze & Diagnose", type="primary"):
+            with st.spinner("Analyzing... (This uses Live LLM tokens)"):
+                try:
+                    # Run async diagnosis in sync streamlit
+                    diagnosis_text, usage = asyncio.run(diagnose_single_group(client, group_id, user_prompt))
+                    
+                    if diagnosis_text:
+                        st.session_state[f"last_report_{group_id}"] = diagnosis_text
+                        st.success("Diagnosis Complete!")
+                        # Removed st.rerun() to keep dialog open
+                    else:
+                        st.error("Diagnosis returned empty.")
+                except Exception as e:
+                    st.error(f"Analysis failed: {e}")
+
+    # Display Report (Persist via session state or database reload)
+    # Check session state first for immediate feedback, then fall back to DB data
+    report_text = st.session_state.get(f"last_report_{group_id}", row_data.get('diagnosis.report'))
+    
+    if report_text and report_text != 'N/A':
+        st.markdown("#### 📄 Diagnosis Report")
         with st.container(border=True):
-            st.markdown(report)
-        st.divider()
+            st.text(report_text) # Using st.text for plain text as requested, or markdown if clean
+    
+    st.divider()
+
+    # --- User Comments ---
+    st.markdown("### 💬 User Comments")
+    
+    # Fetch existing comments (needs fresh fetch usually, or rely on row_data if we add it there)
+    # Let's fetch fresh comments to be sure we don't overwrite with stale data
+    current_comments = ""
+    try:
+        fresh_doc = client.get(index="pega-analysis-results", id=group_id)
+        current_comments = fresh_doc['_source'].get('comments', "")
+    except:
+        pass
+
+    new_comments = st.text_area("Add notes or implementation details...", value=current_comments, height=100)
+    
+    if st.button("💾 Save Comments"):
+        if update_document_comments(client, group_id, new_comments):
+             st.success("Comments saved!")
+             time.sleep(1)
+             st.rerun()
+        else:
+             st.error("Failed to save comments.")
+    
+    st.divider()
 
     # Fetch Samples
     st.markdown("### 📄 Sample Logs")
@@ -385,6 +479,19 @@ def show_inspection_dialog(group_id, row_data, client):
     else:
         st.warning("No raw sample logs found linked to this group (stats-only group or data retention issue).")
 
+def update_document_comments(client, doc_id, comments):
+    """Update the comments field of a document."""
+    try:
+        client.update(
+            index="pega-analysis-results",
+            id=doc_id,
+            body={"doc": {"comments": comments}}
+        )
+        return True
+    except Exception as e:
+        st.error(f"Error updating comments: {e}")
+        return False
+
 
 def backup_analysis_status(client):
     """
@@ -398,9 +505,11 @@ def backup_analysis_status(client):
             "size": 10000,
             "query": {
                 "bool": {
-                    "must_not": [
-                        {"term": {"diagnosis.status": "PENDING"}}
-                    ]
+                     "should": [
+                        {"bool": {"must_not": {"term": {"diagnosis.status": "PENDING"}}}},
+                        {"exists": {"field": "comments"}} # Also matches if comments exist
+                     ],
+                     "minimum_should_match": 1
                 }
             }
         }
@@ -409,8 +518,14 @@ def backup_analysis_status(client):
             src = hit['_source']
             sig = src.get('group_signature')
             diag = src.get('diagnosis', {})
-            if sig:
-                backup[sig] = diag
+            comments = src.get('comments', "")
+            
+            # Backup if we have a diagnosis OR comments
+            if sig and (diag.get('status') != 'PENDING' or comments):
+                backup[sig] = {
+                    "diagnosis": diag,
+                    "comments": comments
+                }
         return backup
     except Exception as e:
         # Index might not exist
@@ -436,14 +551,25 @@ def restore_analysis_status(client, backup_data):
             sig = doc['_source'].get('group_signature')
             
             if sig in backup_data:
+                # Restore
+                saved = backup_data[sig]
+                
+                # Handle old format (just dict) vs new format (nested)
+                if "diagnosis" in saved:
+                     diag_val = saved["diagnosis"]
+                     comments_val = saved.get("comments", "")
+                else:
+                     diag_val = saved # Old format was just the diagnosis dict
+                     comments_val = ""
+                
+                update_body = {"doc": {"diagnosis": diag_val, "comments": comments_val}}
+                
                 # Add to bulk update
                 action = {
                     "_op_type": "update",
                     "_index": "pega-analysis-results",
                     "_id": doc_id,
-                    "doc": {
-                        "diagnosis": backup_data[sig]
-                    }
+                    "doc": update_body["doc"]
                 }
                 bulk_updates.append(action)
                 restored_count += 1

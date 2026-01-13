@@ -123,6 +123,135 @@ def update_diagnosis_in_opensearch(client, doc_id, diagnosis_text, token_usage=N
 
 
 
+def construct_analysis_context(group_doc):
+    """
+    Helper to construct the analysis context dictionary from a group document.
+    """
+    return {
+        "group_signature": group_doc.get('group_signature'),
+        "group_type": group_doc.get('group_type'),
+        "total_count": group_doc.get('count'),
+        "representative_log": group_doc.get('representative_log'),
+        "signature_details": group_doc.get('signature_details'),
+        "exception_signatures": group_doc.get('exception_signatures', []),
+        "message_signatures": group_doc.get('message_signatures', [])
+    }
+
+async def execute_diagnosis(agent, prompt):
+    """
+    Executes the diagnosis using the provided agent and prompt.
+    Returns: (diagnosis_text, token_usage)
+    """
+    try:
+        with get_openai_callback() as cb:
+            response = await agent.ainvoke({"input": prompt})
+            raw_text = response["output"]
+            diagnosis_text = clean_markdown(raw_text)
+            
+            token_usage = {
+                "total_tokens": cb.total_tokens,
+                "prompt_tokens": cb.prompt_tokens,
+                "completion_tokens": cb.completion_tokens,
+                "total_cost": cb.total_cost
+            }
+            print(f"  Diagnosis Cost: ${cb.total_cost:.4f} (Tokens: {cb.total_tokens})")
+            return diagnosis_text, token_usage
+    except Exception as exc:
+        print(f"Failed to execute diagnosis: {exc}")
+        return None, None
+
+async def diagnose_single_group(client, group_id, prompt_template=None):
+    """
+    Standalone function to diagnose a single group by ID.
+    Used by the Dashboard for on-demand analysis.
+    """
+    try:
+        # 1. Fetch Group Data
+        group_doc = client.get(index="pega-analysis-results", id=group_id)
+        if not group_doc or '_source' not in group_doc:
+             return "Group not found or deleted.", {}
+        
+        source = group_doc['_source']
+        analysis_context = construct_analysis_context(source)
+        context_str = json.dumps(analysis_context, indent=2)
+
+        # 2. Setup Agent (Re-using logic from main flow, could be optimized to pass agent in)
+        mcp_server_config = {
+            "opensearch": { 
+                "url": os.getenv("MCP_SERVER_URL", "http://localhost:9900"),
+                "transport": "sse",
+                "headers": {"Content-Type": "application/json", "Accept-Encoding": "identity"}
+            }
+        }
+        
+        mcp_client = MultiServerMCPClient(mcp_server_config)
+        tools = await mcp_client.get_tools()
+        llm = ChatOpenAI(model="gpt-4o")
+        agent = initialize_agent(
+            tools=tools,
+            llm=llm,
+            agent=AgentType.OPENAI_FUNCTIONS,
+            verbose=True,
+            handle_parsing_errors=True
+        )
+
+        # 3. Construct Prompt
+        if not prompt_template:
+            # Default Prompt
+             prompt = f'''
+            You are a Senior Pega Lead System Architect (LSA) analyzing an error group from a Pega Application.
+            
+            Data Provided:
+            {context_str}
+            
+            Perform a deep technical diagnosis and output a report in CLEAN PLAIN TEXT format. 
+            DO NOT USE MARKDOWN (No #, *, or backticks). Use simple upper case for headers.
+
+            Sections:
+
+            1. EXECUTIVE SUMMARY
+            (One concise sentence describing the issue)
+
+            2. SEVERITY ASSESSMENT
+            (CRITICAL / MAJOR / MINOR) - Justify your choice based on the error type.
+
+            3. ERROR FLOW & POINT OF FAILURE
+            Execution Path: Analyze the `group_signature`. Reconstruct the call stack (e.g., "Activity A calls Activity B").
+            Point of Failure: Identify the EXACT Rule or Step where the error occurred.
+
+            4. ROOT CAUSE ANALYSIS
+            Explain *why* this error happened. Connect the Exception message to the specific Rule context.
+
+            5. IMPACT ANALYSIS
+            What functional part of the system is likely broken?
+
+            6. STEP-BY-STEP RESOLUTION
+            Provide concrete, Pega-specific steps for a developer to fix this.
+            Debugging: Mention specific tools (e.g., "Run Tracer on Activity X").
+            Fix: Suggest code changes (e.g., "Add a null check in Step 2").
+            '''
+        else:
+            # Inject context into user provided template if placeholder exists, else append
+            if "{context_str}" in prompt_template:
+                prompt = prompt_template.format(context_str=context_str)
+            else:
+                prompt = f"{prompt_template}\n\nData Provided:\n{context_str}"
+
+        # 4. Execute
+        diagnosis_text, token_usage = await execute_diagnosis(agent, prompt)
+        
+        # 5. Update OpenSearch
+        if diagnosis_text:
+             update_diagnosis_in_opensearch(client, group_id, diagnosis_text, token_usage)
+             
+        return diagnosis_text, token_usage
+
+    except Exception as e:
+        print(f"Error in diagnose_single_group: {e}")
+        return f"Error: {str(e)}", {}
+
+
+
 async def run_diagnosis_workflow():
     print("Starting Log Diagnosis Workflow (LangChain)")
     client = get_opensearch_client()
@@ -170,16 +299,7 @@ async def run_diagnosis_workflow():
             group_id = group_doc['_id']
             
             # Construct Context
-            # We explicitly exclude raw logs to save tokens and reduce noise as requested
-            analysis_context = {
-                "group_signature": group_doc.get('group_signature'),
-                "group_type": group_doc.get('group_type'),
-                "total_count": group_doc.get('count'),
-                "representative_log": group_doc.get('representative_log'),
-                "signature_details": group_doc.get('signature_details'),
-                "exception_signatures": group_doc.get('exception_signatures', []),
-                "message_signatures": group_doc.get('message_signatures', [])
-            }
+            analysis_context = construct_analysis_context(group_doc)
             
             context_str = json.dumps(analysis_context, indent=2)
             
@@ -220,25 +340,10 @@ async def run_diagnosis_workflow():
             '''
 
             # Invoke Agent
-            try:
-                with get_openai_callback() as cb:
-                    response = await agent.ainvoke({"input": prompt})
-                    raw_text = response["output"]
-                    diagnosis_text = clean_markdown(raw_text)
-                    
-                    token_usage = {
-                        "total_tokens": cb.total_tokens,
-                        "prompt_tokens": cb.prompt_tokens,
-                        "completion_tokens": cb.completion_tokens,
-                        "total_cost": cb.total_cost
-                    }
-                    print(f"  Diagnosis Cost: ${cb.total_cost:.4f} (Tokens: {cb.total_tokens})")
-
-                # Write back to OpenSearch
+            diagnosis_text, token_usage = await execute_diagnosis(agent, prompt)
+            
+            if diagnosis_text:
                 update_diagnosis_in_opensearch(client, group_id, diagnosis_text, token_usage)
-                
-            except Exception as exc:
-                print(f"Failed to diagnose group {group_id}: {exc}")
             
     except Exception as e:
         print(f"Error in diagnosis workflow: {e}")
