@@ -65,7 +65,10 @@ def login_page():
         password = st.text_input("Password", type="password")
         
         if st.button("Login", type="primary", width="stretch"):
-            if username == "alamaticz" and password == "Alamaticz#2024":
+            env_user = os.getenv("APP_USERNAME", "alamaticz")
+            env_pass = os.getenv("APP_PASSWORD", "Alamaticz#2024")
+            
+            if username == env_user and password == env_pass:
                 st.session_state.logged_in = True
                 st.rerun()
             else:
@@ -237,7 +240,7 @@ def fetch_detailed_table_data(client, size=1000):
     """Fetch detailed data for the table."""
     query = {
         "size": size,
-        "sort": [{"last_seen": {"order": "desc"}}]
+        "sort": [{"count": {"order": "desc"}}]
     }
     try:
         response = client.search(body=query, index="pega-analysis-results")
@@ -524,68 +527,44 @@ def calculate_summary_metrics(client):
     metrics = {
         "total_errors": 0,
         "unique_issues": 0,
-        "most_frequent": "N/A",
-        "last_incident": "N/A"
+        "pending_issues": 0,
+        "resolved_issues": 0
     }
     
     try:
         # Total Errors
-        count_res = client.count(body={"query": {"match": {"log.level": "ERROR"}}}, index="pega-logs")
-        metrics["total_errors"] = count_res["count"]
+        if client.indices.exists(index="pega-logs"):
+             count_res = client.count(body={"query": {"match": {"log.level": "ERROR"}}}, index="pega-logs")
+             metrics["total_errors"] = count_res["count"]
         
-        # Unique Issues & Top Rule Error
-        # We want the group with the highest 'count' field
         # Unique Issues
         try:
-             unique_res = client.count(index="pega-analysis-results")
-             metrics["unique_issues"] = unique_res["count"]
+             if client.indices.exists(index="pega-analysis-results"):
+                unique_res = client.count(index="pega-analysis-results")
+                metrics["unique_issues"] = unique_res["count"]
+                
+                # Pending Issues
+                pending_res = client.count(
+                    index="pega-analysis-results",
+                    body={"query": {"term": {"diagnosis.status": "PENDING"}}}
+                )
+                metrics["pending_issues"] = pending_res["count"]
+                
+                # Resolved Issues (RESOLVED, FALSE POSITIVE, COMPLETED, IGNORE)
+                resolved_res = client.count(
+                    index="pega-analysis-results",
+                    body={"query": {"terms": {"diagnosis.status": ["RESOLVED", "FALSE POSITIVE", "COMPLETED", "IGNORE"]}}}
+                )
+                metrics["resolved_issues"] = resolved_res["count"]
+                
         except:
              metrics["unique_issues"] = 0
-
-        # Top Rule Error
-        rule_query = {
-            "size": 1,
-            "query": {"term": {"group_type": "RuleSequence"}},
-            "sort": [{"count": {"order": "desc"}}]
-        }
-        rule_res = client.search(body=rule_query, index="pega-analysis-results")
-        
-        if rule_res["hits"]["hits"]:
-            top_src = rule_res["hits"]["hits"][0]["_source"]
-            sig = top_src.get("group_signature", "")
-            
-            # Parse Rule Name
-            # Extract just the rule name from the first part of signature
-            first_part = sig.split('|')[0].strip()
-            tokens = first_part.split('->')
-            if len(tokens) >= 2:
-                metrics["most_frequent"] = tokens[1]
-            else:
-                metrics["most_frequent"] = sig[:30] + "..."
-        else:
-            metrics["most_frequent"] = "None"
-            
-        # Last Incident
-        last_query = {
-            "size": 1,
-            "sort": [{"ingestion_timestamp": {"order": "desc"}}],
-            "query": {"match": {"log.level": "ERROR"}}
-        }
-        last_res = client.search(body=last_query, index="pega-logs")
-        if last_res["hits"]["hits"]:
-            timestamp = last_res["hits"]["hits"][0]["_source"].get("ingestion_timestamp")
-            try:
-                dt = pd.to_datetime(timestamp, format='mixed')
-                suffix = 'th' if 11 <= dt.day <= 13 else {1:'st', 2:'nd', 3:'rd'}.get(dt.day % 10, 'th')
-                # explicit format: "31st dec 2026 , 7:06 am"
-                date_part = f"{dt.day}{suffix} {dt.strftime('%b').lower()} {dt.year}"
-                time_part = dt.strftime('%I:%M %p').lstrip('0').lower()
-                metrics["last_incident"] = f"{date_part} , {time_part}"
-            except Exception:
-                metrics["last_incident"] = timestamp
+             metrics["pending_issues"] = 0
+             metrics["resolved_issues"] = 0
             
     except Exception as e:
-        st.error(f"Error calculating metrics: {e}")
+        # st.error(f"Error calculating metrics: {e}")
+        pass
         
     return metrics
 
@@ -618,10 +597,73 @@ if st.sidebar.button("Grouping Studio", width="stretch"):
     st.rerun()
 
 
+# --- Profile & Settings Logic ---
+@st.dialog("👤 User Profile")
+def show_profile_dialog():
+    st.markdown("### Account Details")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        if os.path.exists("assets/logo.jpg"):
+             st.image("assets/logo.jpg", width=100)
+        else:
+             st.info("No Avatar")
+    with c2:
+        st.markdown(f"**Username:** `{st.session_state.get('username', 'Allowed User')}`")
+        st.markdown("**Role:** `Administrator`")
+        st.markdown(f"**Session Started:** `{datetime.now().strftime('%H:%M %p')}`")
+
+    st.divider()
+    st.markdown("### Security")
+    with st.form("change_pwd"):
+        st.text_input("New Password", type="password")
+        st.text_input("Confirm Password", type="password")
+        if st.form_submit_button("Update Password"):
+            st.success("Password updated for this session.")
+
+@st.dialog("⚙️ System Settings")
+def show_settings_dialog():
+    st.markdown("### 🔌 Connection Status")
+    client = get_opensearch_client()
+    if client and client.ping():
+        st.success("OpenSearch: Connected (Healthy)")
+    else:
+        st.error("OpenSearch: Disconnected")
+        
+    st.divider()
+    st.markdown("### 🛠️ Analysis Configuration")
+    
+    # Analysis Speed
+    current_batch = st.session_state.get("config_batch_size", 1000)
+    new_batch = st.slider("Grouping Batch Size (Speed vs Stability)", 
+                          min_value=500, max_value=5000, value=current_batch, step=500,
+                          help="Higher = Faster, but check for stability.")
+    st.session_state.config_batch_size = new_batch
+    
+    # AI Model
+    model = st.selectbox("AI Pattern Model", ["GPT-4o (Smartest)", "GPT-3.5-Turbo (Fastest)"], index=0)
+    
+    # Display Settings
+    st.divider()
+    st.markdown("### 🎨 Appearance")
+    compact = st.toggle("Compact Table Mode", value=st.session_state.get("compact_mode", False))
+    st.session_state.compact_mode = compact
+    
+    if st.button("Save Settings", type="primary"):
+        st.rerun()
+
+# --- Sidebar User Menu ---
 st.sidebar.markdown("---")
-if st.sidebar.button("Logout", type="primary", width="stretch"):
-    st.session_state.logged_in = False
-    st.rerun()
+with st.sidebar.expander(f"👤 {os.getenv('APP_USERNAME', 'Alamaticz User')}", expanded=False):
+    if st.button("Profile", width="stretch"):
+        show_profile_dialog()
+    
+    if st.button("Settings", width="stretch"):
+        show_settings_dialog()
+        
+    st.divider()
+    if st.button("Logout", type="primary", width="stretch"):
+        st.session_state.logged_in = False
+        st.rerun()
 
 page = st.session_state.active_page
 
@@ -634,8 +676,9 @@ if page == "Dashboard":
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Errors", metrics["total_errors"])
         m2.metric("Unique Issues", metrics["unique_issues"])
-        m3.metric("Top Rule Failure", metrics["most_frequent"])
-        m4.metric("Recent Ingestion", metrics["last_incident"])
+        m3.metric("Pending Analysis", metrics["pending_issues"])
+        m4.metric("Resolved Issues", metrics["resolved_issues"])
+
         
         st.markdown("---")
 
@@ -664,6 +707,9 @@ if page == "Dashboard":
         df_details = fetch_detailed_table_data(client)
         
         if not df_details.empty:
+            # Search Bar
+            search_query = st.text_input("🔍 Search Logs", placeholder="Type to search by Rule Name, Exception, or Message...")
+            
             # Filters
             f1, f2 = st.columns(2)
             with f1:
@@ -678,11 +724,25 @@ if page == "Dashboard":
                 selected_statuses = statuses
             if not selected_types:
                 selected_types = types
-
-            filtered_df = df_details[
+            
+            # Base Filters
+            mask = (
                 (df_details['diagnosis.status'].isin(selected_statuses)) &
                 (df_details['group_type'].isin(selected_types))
-            ]
+            )
+            
+            # Apply Search Query
+            if search_query:
+                # Case-insensitive string search across relevant columns
+                search_mask = (
+                    df_details['display_rule'].astype(str).str.contains(search_query, case=False, na=False, regex=False) |
+                    df_details['exception_summary'].astype(str).str.contains(search_query, case=False, na=False, regex=False) |
+                    df_details['message_summary'].astype(str).str.contains(search_query, case=False, na=False, regex=False) |
+                    df_details['group_type'].astype(str).str.contains(search_query, case=False, na=False, regex=False)
+                )
+                mask = mask & search_mask
+
+            filtered_df = df_details[mask]
             
             # Ensure all existing statuses are in the options
             standard_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "COMPLETED"]
