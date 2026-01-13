@@ -37,7 +37,7 @@ async def initialize_agent_executor(memory=None):
     if not tools:
         raise ValueError("No tools found from MCP server.")
 
-    model = ChatOpenAI(model="gpt-4o", streaming=True)
+    model = ChatOpenAI(model="gpt-5.2", streaming=True)
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", "You are a helpful Log Analysis Assistant. You have access to OpenSearch logs. You usually don't need to mention Tool names. IMPORTANT: Always check the index mapping using get_mapping or similar tools before performing any searches to ensure you use the correct fields. Ensure you build syntactically correct OpenSearch DSL queries relative to the mapping found. When searching for errors or logs, ALWAYS search across 'log.message', 'exception_message', and 'log.exception.exception_message' fields. Do not rely on a single field."),
