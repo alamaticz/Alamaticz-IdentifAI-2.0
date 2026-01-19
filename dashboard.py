@@ -783,7 +783,8 @@ def backup_analysis_status(client):
                 "bool": {
                      "should": [
                         {"bool": {"must_not": {"term": {"diagnosis.status": "PENDING"}}}},
-                        {"exists": {"field": "comments"}} # Also matches if comments exist
+                        {"exists": {"field": "comments"}}, # Also matches if comments exist
+                        {"exists": {"field": "audit_history"}} # Match if history exists
                      ],
                      "minimum_should_match": 1
                 }
@@ -795,12 +796,14 @@ def backup_analysis_status(client):
             sig = src.get('group_signature')
             diag = src.get('diagnosis', {})
             comments = src.get('comments', "")
+            history = src.get('audit_history', [])
             
-            # Backup if we have a diagnosis OR comments
-            if sig and (diag.get('status') != 'PENDING' or comments):
+            # Backup if we have a diagnosis OR comments OR history
+            if sig and (diag.get('status') != 'PENDING' or comments or history):
                 backup[sig] = {
                     "diagnosis": diag,
-                    "comments": comments
+                    "comments": comments,
+                    "audit_history": history
                 }
         return backup
     except Exception as e:
@@ -834,11 +837,19 @@ def restore_analysis_status(client, backup_data):
                 if "diagnosis" in saved:
                      diag_val = saved["diagnosis"]
                      comments_val = saved.get("comments", "")
+                     history_val = saved.get("audit_history", [])
                 else:
                      diag_val = saved # Old format was just the diagnosis dict
                      comments_val = ""
+                     history_val = []
                 
-                update_body = {"doc": {"diagnosis": diag_val, "comments": comments_val}}
+                update_body = {
+                    "doc": {
+                        "diagnosis": diag_val, 
+                        "comments": comments_val,
+                        "audit_history": history_val
+                    }
+                }
                 
                 # Add to bulk update
                 action = {
