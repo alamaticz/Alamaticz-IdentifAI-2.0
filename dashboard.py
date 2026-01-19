@@ -4,7 +4,7 @@ import plotly.express as px
 import os
 import time
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import asyncio
 import chat_agent
@@ -33,8 +33,9 @@ def save_chat_history(messages):
     except Exception as e:
         st.error(f"Error saving chat history: {e}")
 
-# # Apply nest_asyncio to allow nested event loops in Streamlit
-# nest_asyncio.apply()
+# Apply nest_asyncio to allow nested event loops in Streamlit
+import nest_asyncio
+nest_asyncio.apply()
 
 # Load environment variables
 load_dotenv(override=True)
@@ -68,8 +69,10 @@ def login_page():
             env_user = os.getenv("APP_USERNAME", "alamaticz")
             env_pass = os.getenv("APP_PASSWORD", "Alamaticz#2024")
             
-            if username == env_user and password == env_pass:
+            if username and password == env_pass:
+                # Allow any username as long as password matches
                 st.session_state.logged_in = True
+                st.session_state.username = username
                 st.rerun()
             else:
                 st.error("Invalid credentials")
@@ -294,13 +297,41 @@ def fetch_detailed_table_data(client, size=1000):
         st.error(f"Error fetching details: {e}")
         return pd.DataFrame()
 
-def update_document_status(client, doc_id, new_status):
-    """Update the diagnosis status of a document."""
+def update_document_status(client, doc_id, new_status, user="Unknown"):
+    """Update the diagnosis status of a document with audit trail."""
     try:
+        # Use a script to update status AND append to history
+        script_source = """
+            ctx._source.diagnosis.status = params.status;
+            if (ctx._source.audit_history == null) {
+                ctx._source.audit_history = [];
+            }
+            ctx._source.audit_history.add(params.entry);
+        """
+        
+        # IST Timestamp
+        ist_now = (datetime.utcnow() + timedelta(hours=5, minutes=30)).isoformat()
+        
+        audit_entry = {
+            "timestamp": ist_now,
+            "user": user,
+            "action": "STATUS_CHANGE",
+            "details": f"Changed status onto {new_status}"
+        }
+        
         client.update(
             index="pega-analysis-results",
             id=doc_id,
-            body={"doc": {"diagnosis": {"status": new_status}}}
+            body={
+                "script": {
+                    "source": script_source,
+                    "lang": "painless",
+                    "params": {
+                        "status": new_status,
+                        "entry": audit_entry
+                    }
+                }
+            }
         )
         return True
     except Exception as e:
@@ -360,7 +391,8 @@ def show_inspection_dialog(group_id, row_data, client):
         new_status = st.selectbox("Status", options=status_options, index=status_options.index(current_status), key="dialog_status_select")
         
         if new_status != current_status:
-            if update_document_status(client, group_id, new_status):
+            current_user = st.session_state.get("username", "Unknown")
+            if update_document_status(client, group_id, new_status, user=current_user):
                 st.success(f"Status updated to {new_status}")
                 time.sleep(1)
                 st.rerun()
@@ -427,6 +459,152 @@ Sections: EXECUTIVE SUMMARY, SEVERITY, ERROR FLOW, ROOT CAUSE, IMPACT, RESOLUTIO
     
     st.divider()
 
+    # --- 💬 AI Group Assistant ---
+    st.markdown("### 💬 AI Group Assistant")
+    
+    # Internal Container for Chat to allow scrolling
+    chat_container = st.container(height=400)
+    
+    # Chat History Logic for this specific group
+    hist_key = f"chat_history_{group_id}"
+    mem_key = f"agent_memory_{group_id}"
+    
+    if hist_key not in st.session_state:
+        st.session_state[hist_key] = []
+        # Initial Greeting
+        st.session_state[hist_key].append({
+            "role": "assistant",
+            "content": "Hello! I have the context for this error group. You can ask me to explain the error or ask me to **update the analysis result** based on new information."
+        })
+        
+    # Display messages inside scrollable container
+    with chat_container:
+        for msg in st.session_state[hist_key]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+            
+    # Chat Input (Pinned to bottom of this section roughly, or global to dialog)
+    # Note: st.chat_input in a dialog pins to the bottom of the DIALOG. 
+    if prompt := st.chat_input(f"User Input", key=f"input_{group_id}"):
+        # 1. Add User Message
+        st.session_state[hist_key].append({"role": "user", "content": prompt})
+        
+        # We need to manually append to container for immediate feedback before rerun
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+        # 2. Run Agent
+        # We want the thinking process to show in the container too
+        with chat_container:
+             with st.chat_message("assistant"):
+                try:
+                    # Construct Context (reuse logic)
+                    try:
+                        fresh_src = client.get(index="pega-analysis-results", id=group_id)['_source']
+                        context_dict = construct_analysis_context(fresh_src)
+                    except:
+                         context_dict = row_data.to_dict()
+                    
+                    context_str = json.dumps(context_dict, indent=2)
+
+                    # Async Wrapper
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                    async def run_group_agent(user_input):
+                         # Lazy Memory Init
+                         if mem_key not in st.session_state:
+                              from langchain.memory import ConversationBufferMemory
+                              st.session_state[mem_key] = ConversationBufferMemory(
+                                    memory_key="chat_history",
+                                    return_messages=True,
+                                    input_key="input",
+                                    output_key="output"
+                              )
+                              
+                         executor = await chat_agent.initialize_group_chat_agent(
+                             group_id=group_id,
+                             group_context_str=context_str,
+                             memory=st.session_state[mem_key]
+                         )
+                         
+                         full_res = ""
+                         placeholder = st.empty()
+                         placeholder.markdown("⏳ *Thinking...*")
+                         
+                         print(f"[DEBUG] Starting stream for group {group_id}")
+                         try:
+                             async for event in executor.astream_events({"input": user_input}, version="v1"):
+                                 kind = event["event"]
+                                 
+                                 if kind == "on_tool_start":
+                                      name = event['name']
+                                      placeholder.markdown(f"🛠️ **Executing**: `{name}`")
+                                 
+                                 elif kind == "on_chat_model_stream":
+                                      chunk = event["data"]["chunk"]
+                                      content = chunk.content
+                                      if content:
+                                          full_res += content
+                                          yield content
+                                          
+                                 elif kind == "on_tool_end":
+                                      placeholder.markdown("✅ Tool Finished. Generating response...")
+                                      
+                         except Exception as e:
+                             print(f"[ERROR] Stream failed: {e}")
+                             placeholder.error(f"Error: {e}")
+                         
+                         if not full_res:
+                             print("[WARN] No content received from stream.")
+                             pass
+                         
+                         placeholder.empty()
+                         st.session_state[f"last_response_{group_id}"] = full_res
+                    
+                    # Sync Bridge
+                    def sync_gen_wrapper(async_gen):
+                        while True:
+                            try:
+                                chunk = loop.run_until_complete(async_gen.__anext__())
+                                yield chunk
+                            except StopAsyncIteration:
+                                break
+                            except Exception as e:
+                                st.error(f"Stream error: {e}")
+                                break
+                                
+                    st.write_stream(sync_gen_wrapper(run_group_agent(prompt)))
+                    
+                    # Save Assistant Message
+                    final_res = st.session_state.get(f"last_response_{group_id}")
+                    if final_res:
+                        st.session_state[hist_key].append({"role": "assistant", "content": final_res})
+                        
+                        # --- Auto Refresh Logic ---
+                        if "Successfully updated" in final_res:
+                            st.toast("Analysis updated! Refreshing view...", icon="🔄")
+                            time.sleep(1) # Give elasticsearch a moment to index (wait_for_refresh logic ideally, but sleep is okay here)
+                            # Fetch Fresh Report to update local session state immediately
+                            try:
+                                fresh_doc = client.get(index="pega-analysis-results", id=group_id)
+                                new_report = fresh_doc['_source']['diagnosis']['report']
+                                st.session_state[f"last_report_{group_id}"] = new_report
+                            except Exception as e:
+                                print(f"Error fetching fresh report: {e}")
+                            
+                            st.rerun()
+
+                except Exception as e:
+                    st.error(f"Agent failed: {e}")
+
+
+    st.divider()
+
     # --- User Comments ---
     st.markdown("### 💬 User Comments")
     
@@ -442,7 +620,8 @@ Sections: EXECUTIVE SUMMARY, SEVERITY, ERROR FLOW, ROOT CAUSE, IMPACT, RESOLUTIO
     new_comments = st.text_area("Add notes or implementation details...", value=current_comments, height=100)
     
     if st.button("💾 Save Comments"):
-        if update_document_comments(client, group_id, new_comments):
+        current_user = st.session_state.get("username", "Unknown")
+        if update_document_comments(client, group_id, new_comments, user=current_user):
              st.success("Comments saved!")
              time.sleep(1)
              st.rerun()
@@ -479,19 +658,116 @@ Sections: EXECUTIVE SUMMARY, SEVERITY, ERROR FLOW, ROOT CAUSE, IMPACT, RESOLUTIO
     else:
         st.warning("No raw sample logs found linked to this group (stats-only group or data retention issue).")
 
-def update_document_comments(client, doc_id, comments):
-    """Update the comments field of a document."""
+def update_document_comments(client, doc_id, comments, user="Unknown"):
+    """Update the comments field of a document with audit history."""
     try:
+        # Script update to set comments AND append to audit_history
+        script_source = """
+            ctx._source.comments = params.comments;
+            if (ctx._source.audit_history == null) {
+                ctx._source.audit_history = [];
+            }
+            ctx._source.audit_history.add(params.entry);
+        """
+        
+        # IST Timestamp
+        ist_now = (datetime.utcnow() + timedelta(hours=5, minutes=30)).isoformat()
+        
+        audit_entry = {
+            "timestamp": ist_now,
+            "user": user,
+            "action": "COMMENT_UPDATE",
+            "details": "Updated comments/notes"
+        }
+        
         client.update(
             index="pega-analysis-results",
             id=doc_id,
-            body={"doc": {"comments": comments}}
+            body={
+                "script": {
+                    "source": script_source,
+                    "lang": "painless",
+                    "params": {
+                        "comments": comments,
+                        "entry": audit_entry
+                    }
+                }
+            }
         )
         return True
     except Exception as e:
         st.error(f"Error updating comments: {e}")
         return False
 
+
+def fetch_global_audit_history(client, size=100):
+    """
+    Fetch the most recent audit history entries from all documents.
+    Returns a flattened DataFrame.
+    """
+    try:
+        # Query for documents that HAVE an audit_history field
+        query = {
+            "size": size,
+            "query": {
+                "exists": {"field": "audit_history"}
+            },
+            "_source": ["audit_history", "group_signature", "diagnosis.status"]
+        }
+        
+        resp = client.search(index="pega-analysis-results", body=query)
+        
+        history_items = []
+        for hit in resp['hits']['hits']:
+            src = hit['_source']
+            sig = src.get('group_signature', 'Unknown Group')
+            # audit_history is a list of dicts
+            audits = src.get('audit_history', [])
+            
+            for entry in audits:
+                # Add context from the parent doc
+                entry_flat = entry.copy()
+                entry_flat['group_signature'] = sig
+                # entry_flat['doc_id'] = hit['_id'] # Optional if needed
+                history_items.append(entry_flat)
+        
+        # Convert to DF
+        df = pd.DataFrame(history_items)
+        
+        if not df.empty:
+            # Sort by timestamp descending
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.sort_values('timestamp', ascending=False)
+            
+        return df
+            
+    except Exception as e:
+        # st.error(f"Error fetching history: {e}")
+        return pd.DataFrame()
+
+@st.dialog("🕒 Audit History", width="large")
+def show_audit_history_dialog(client):
+    st.markdown("### 📜 Recent User Actions")
+    st.info("Showing the most recent changes to groups (Status changes, Comments, etc.)")
+    
+    with st.spinner("Loading history..."):
+        df_history = fetch_global_audit_history(client, size=200)
+    
+    if not df_history.empty:
+        st.dataframe(
+            df_history,
+            column_config={
+                "timestamp": st.column_config.DatetimeColumn("Time", format="D MMM YYYY, h:mm a"),
+                "user": "User",
+                "action": "Action",
+                "group_signature": st.column_config.TextColumn("Group", width="medium"),
+                "details": st.column_config.TextColumn("Details", width="large")
+            },
+            hide_index=True,
+            width="stretch"
+        )
+    else:
+        st.warning("No audit history found yet.")
 
 def backup_analysis_status(client):
     """
@@ -797,6 +1073,9 @@ page = st.session_state.active_page
 if page == "Dashboard":
     st.markdown("### 📊 Pega Log Analysis Dashboard")
     if client:
+        # Track if a dialog is already opened this run to avoid conflicts
+        dialog_opened = False
+        
         # 1. Summary Metrics (Top)
         metrics = calculate_summary_metrics(client)
         m1, m2, m3, m4 = st.columns(4)
@@ -804,11 +1083,19 @@ if page == "Dashboard":
         m2.metric("Unique Issues", metrics["unique_issues"])
         m3.metric("Pending Analysis", metrics["pending_issues"])
         m4.metric("Resolved Issues", metrics["resolved_issues"])
+        
+        # Add History Button under the metrics (or aligned with them if layout allows)
+        # Using a small columns layout right below or just a button in a new row
+        
+        if st.button("🕒 View Resolution History"):
+            show_audit_history_dialog(client)
+            dialog_opened = True
 
         
         st.markdown("---")
 
         # 2. Detailed Table
+        
         c_tbl_head, c_tbl_btn = st.columns([3, 1])
         c_tbl_head.subheader("📋 Detailed Group Analysis")
         with c_tbl_btn:
@@ -906,10 +1193,11 @@ if page == "Dashboard":
             
             # --- POPUP LOGIC ---
             inspected_rows = edited_df[edited_df["Inspect"]]
-            if not inspected_rows.empty:
+            if not inspected_rows.empty and not dialog_opened:
                 # Show dialog for the first selected
                 row = inspected_rows.iloc[0]
                 show_inspection_dialog(row['doc_id'], row, client)
+                dialog_opened = True
 
 
             # Detect Changes
@@ -920,7 +1208,9 @@ if page == "Dashboard":
                     for index, row in changed_rows.iterrows():
                         doc_id = row['doc_id']
                         new_status = row['diagnosis.status']
-                        update_document_status(client, doc_id, new_status)
+                        # When bulk editing, we use the logged in user
+                        current_user = st.session_state.get("username", "Unknown")
+                        update_document_status(client, doc_id, new_status, user=current_user)
                     st.success("Status updated successfully! Refreshing...")
                     st.rerun()
         else:
