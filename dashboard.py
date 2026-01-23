@@ -14,6 +14,32 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 
 CHAT_HISTORY_FILE = "chat_history.json"
 
+# --- Timezone Helper ---
+def apply_timezone_conversion(df, col_name, timezone_option):
+    """
+    Convert a dataframe column from UTC to selected timezone.
+    Assumes source is UTC (default from OpenSearch).
+    """
+    if df.empty or col_name not in df.columns:
+        return df
+        
+    # Ensure datetime
+    if not pd.api.types.is_datetime64_any_dtype(df[col_name]):
+        df[col_name] = pd.to_datetime(df[col_name], format='mixed', errors='coerce')
+        
+    # Conversion Logic
+    # IST = UTC + 5:30
+    # PST = UTC - 8:00
+    if timezone_option == "IST":
+        df[col_name] = df[col_name] + pd.Timedelta(hours=5, minutes=30)
+    elif timezone_option == "PST":
+        df[col_name] = df[col_name] - pd.Timedelta(hours=8)
+    
+    # If it was already timezone aware, we might need to handle it differently, 
+    # but pd.to_datetime usually returns naive if input is naive ISO.
+    # OpenSearch ISOs differ but usually we treat them as naive UTC for simple shifting.
+    return df
+
 def load_chat_history():
     """Load chat history from a JSON file."""
     if os.path.exists(CHAT_HISTORY_FILE):
@@ -1135,14 +1161,21 @@ if page == "Dashboard":
             search_query = st.text_input("🔍 Search Logs", placeholder="Type to search by Rule Name, Exception, or Message...")
             
             # Filters
-            f1, f2 = st.columns(2)
+            f1, f2, f3 = st.columns([1, 1, 1])
             with f1:
                 statuses = df_details['diagnosis.status'].dropna().unique().tolist()
                 selected_statuses = st.multiselect("Filter by Status", statuses, default=[])
             with f2:
                 types = df_details['group_type'].dropna().unique().tolist()
                 selected_types = st.multiselect("Filter by Type", types, default=[])
-            
+            with f3:
+                 # Timezone Selector
+                 timezone_opt = st.radio("Time Zone", ["IST", "PST"], horizontal=True, index=0)
+
+            # Apply Timezone Conversion
+            if timezone_opt:
+                df_details = apply_timezone_conversion(df_details, "last_seen", timezone_opt)
+
             # Filter Logic: Empty selection implies "All"
             if not selected_statuses:
                 selected_statuses = statuses
@@ -1516,6 +1549,17 @@ elif page == "Grouping Studio":
                 filtered_df = df_details[mask]
             else:
                 filtered_df = df_details
+
+            # Timezone Selector (Placed above table or near search?)
+            # Let's put it in a column next to search or buttons to save space, or just above table.
+            # Reuse columns from buttons row if possible or new row.
+            
+            t_col1, t_col2 = st.columns([4, 1])
+            with t_col2:
+                 gs_timezone_opt = st.radio("Time Zone", ["IST", "PST"], horizontal=True, key="gs_tz_opt")
+            
+            if gs_timezone_opt:
+                 filtered_df = apply_timezone_conversion(filtered_df, "last_seen", gs_timezone_opt)
 
             # Ensure Status options are present for the Selectbox config (reuse logic)
             standard_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "COMPLETED"]
