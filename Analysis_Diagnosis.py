@@ -106,7 +106,7 @@ def update_diagnosis_in_opensearch(client, doc_id, diagnosis_text, token_usage=N
     body = {
         "doc": {
             "diagnosis": {
-                "status": "COMPLETED",
+                "status": "DIAGNOSIS COMPLETED",
                 "report": diagnosis_text,
                 "report": diagnosis_text,
                 "timestamp": datetime.utcnow().isoformat(),

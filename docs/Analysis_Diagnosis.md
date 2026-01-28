@@ -30,7 +30,7 @@ This script operates as a background worker. It does not ingest logs; it consume
         {
           "root_cause": "NullPointer in Activity 'CalculateTax'",
           "recommendation": "Check if 'TaxRate' page is initialized before Step 3.",
-          "status": "COMPLETED"
+          "status": "DIAGNOSIS COMPLETED"
         }
         ```
     *   The script updates the document in `pega-analysis-results` with this new information.
@@ -39,7 +39,7 @@ This script operates as a background worker. It does not ingest logs; it consume
 
 *   **LangChain**: Orchestrates the interaction with OpenAI.
 *   **OpenAI API**: The underlying intelligence (GPT-4o).
-*   **OpenSearch**: Reads PENDING groups, writes COMPLETED diagnoses.
+*   **OpenSearch**: Reads PENDING groups, writes DIAGNOSIS COMPLETED diagnoses.
 
 ## Concurrency
 *   **Sequential execution**: Currently, the script processes groups sequentially to ensure stability and avoid rate limits.

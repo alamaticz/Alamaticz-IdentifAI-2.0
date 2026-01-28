@@ -408,7 +408,7 @@ def show_inspection_dialog(group_id, row_data, client):
         
         # Editable Status
         current_status = row_data.get('diagnosis.status', 'PENDING')
-        status_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "COMPLETED"]
+        status_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "DIAGNOSIS COMPLETED"]
         
         # Ensure current status is in options
         if current_status not in status_options:
@@ -992,7 +992,7 @@ def calculate_summary_metrics(client):
                 # Resolved Issues (RESOLVED, FALSE POSITIVE, COMPLETED, IGNORE)
                 resolved_res = client.count(
                     index="pega-analysis-results",
-                    body={"query": {"terms": {"diagnosis.status": ["RESOLVED", "FALSE POSITIVE", "COMPLETED", "IGNORE"]}}}
+                    body={"query": {"terms": {"diagnosis.status": ["RESOLVED", "FALSE POSITIVE", "DIAGNOSIS COMPLETED", "IGNORE"]}}}
                 )
                 metrics["resolved_issues"] = resolved_res["count"]
                 
@@ -1202,7 +1202,7 @@ if page == "Dashboard":
             filtered_df = df_details[mask]
             
             # Ensure all existing statuses are in the options
-            standard_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "COMPLETED"]
+            standard_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "DIAGNOSIS COMPLETED"]
             existing_statuses = df_details['diagnosis.status'].dropna().unique().tolist()
             # Merge and deduplicate, keeping standard options order preferred
             all_options = list(dict.fromkeys(standard_options + existing_statuses))
@@ -1562,7 +1562,7 @@ elif page == "Grouping Studio":
                  filtered_df = apply_timezone_conversion(filtered_df, "last_seen", gs_timezone_opt)
 
             # Ensure Status options are present for the Selectbox config (reuse logic)
-            standard_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "COMPLETED"]
+            standard_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "DIAGNOSIS COMPLETED"]
             existing_statuses = df_details['diagnosis.status'].dropna().unique().tolist()
             all_options = list(dict.fromkeys(standard_options + existing_statuses))
 
