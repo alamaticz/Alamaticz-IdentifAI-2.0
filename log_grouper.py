@@ -117,7 +117,7 @@ def get_opensearch_client():
         verify_certs=False,
         ssl_show_warn=False,
         timeout=120,
-        max_retries=5,
+        max_retries=10, # Increased retries
         retry_on_timeout=True,
         retry_on_status=(429, 500, 502, 503, 504)
     )
@@ -379,8 +379,9 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
         client,
         query=query,
         index=SOURCE_INDEX,
-        scroll="10m", # Increased for larger parallel jobs
-        size=1000,
+        scroll="30m", # Increased for larger parallel jobs
+        size=500, # Decreased batch size
+        request_timeout=300, # Increased per-request timeout
         _source=_source_fields 
     )
 
