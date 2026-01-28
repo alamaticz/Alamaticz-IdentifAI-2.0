@@ -305,10 +305,11 @@ def fetch_detailed_table_data(client, size=5000):
             data.append({
                 "doc_id": hit['_id'],
                 "last_seen": src.get('last_seen'),
-                "group_signature": src.get('group_signature'),
-                "group_type": src.get('group_type'),
                 "count": src.get('count'),
                 "diagnosis.status": src.get('diagnosis', {}).get('status', 'PENDING'),
+                "assigned_user": src.get('assigned_user', 'Unassigned'),
+                "group_signature": src.get('group_signature'),
+                "group_type": src.get('group_type'),
                 "display_rule": display_rule,
                 "exception_summary": display_exception,
                 "message_summary": display_message,
@@ -329,6 +330,7 @@ def update_document_status(client, doc_id, new_status, user="Unknown"):
         # Use a script to update status AND append to history
         script_source = """
             ctx._source.diagnosis.status = params.status;
+            ctx._source.assigned_user = params.user;
             if (ctx._source.audit_history == null) {
                 ctx._source.audit_history = [];
             }
@@ -354,7 +356,8 @@ def update_document_status(client, doc_id, new_status, user="Unknown"):
                     "lang": "painless",
                     "params": {
                         "status": new_status,
-                        "entry": audit_entry
+                        "entry": audit_entry,
+                        "user": user
                     }
                 }
             }
@@ -1221,16 +1224,17 @@ if page == "Dashboard":
                     "last_seen": st.column_config.DatetimeColumn("Last Seen", format="D MMM YYYY, h:mm a"),
                     "count": st.column_config.ProgressColumn("Count", format="%d", min_value=0, max_value=int(df_details['count'].max())),
                     "diagnosis.status": st.column_config.SelectboxColumn("Status", options=all_options, required=True),
+                    "assigned_user": st.column_config.TextColumn("Assigned User", width="small"),
                     "group_signature": st.column_config.TextColumn("Full Signature", width="small", help="Unique signature defining this group"),
                     "group_type": "Type",
                     "display_rule": "Rule Name",
                     "exception_summary": "Exception Info",
                     "message_summary": "Log Message",
                     "logger_name": "Logger",
-                    "diagnosis.report": "Report"
+                    "diagnosis.report": "Report",
                 },
                 disabled=["last_seen", "group_signature", "group_type", "count", "display_rule", 
-                          "exception_summary", "message_summary", "logger_name", "diagnosis.report"],
+                          "exception_summary", "message_summary", "logger_name", "diagnosis.report", "assigned_user"],
                 hide_index=True,
                 key="detailed_table"
             )
@@ -1577,16 +1581,17 @@ elif page == "Grouping Studio":
                     "last_seen": st.column_config.DatetimeColumn("Last Seen", format="D MMM YYYY, h:mm a"),
                     "count": st.column_config.ProgressColumn("Count", format="%d", min_value=0, max_value=int(df_details['count'].max())),
                     "diagnosis.status": st.column_config.SelectboxColumn("Status", options=all_options, required=True),
+                    "assigned_user": st.column_config.TextColumn("Assigned User", width="small"),
                     "group_signature": st.column_config.TextColumn("Full Signature", width="small", help="Unique signature defining this group"),
                     "group_type": "Type",
                     "display_rule": "Rule Name",
                     "exception_summary": "Exception Info",
                     "message_summary": "Log Message",
                     "logger_name": "Logger",
-                    "diagnosis.report": "Report"
+                    "diagnosis.report": "Report",
                 },
                 disabled=["last_seen", "group_signature", "group_type", "count", "display_rule", 
-                          "exception_summary", "message_summary", "logger_name", "diagnosis.report"],
+                          "exception_summary", "message_summary", "logger_name", "diagnosis.report", "assigned_user"],
                 hide_index=True,
                 key=f"grouping_selector_table_{st.session_state.grouping_editor_key}"
             )
