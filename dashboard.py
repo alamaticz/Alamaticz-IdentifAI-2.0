@@ -408,7 +408,7 @@ def show_inspection_dialog(group_id, row_data, client):
         
         # Editable Status
         current_status = row_data.get('diagnosis.status', 'PENDING')
-        status_options = ["PENDING", "IN PROCESS", "RESOLVED", "FALSE POSITIVE", "IGNORE", "DIAGNOSIS COMPLETED"]
+        status_options = ["PENDING", "IN PROCESS", "RESOLVED", "IGNORE", "DIAGNOSIS COMPLETED"]
         
         # Ensure current status is in options
         if current_status not in status_options:
