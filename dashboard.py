@@ -985,19 +985,15 @@ def calculate_summary_metrics(client):
                 unique_res = client.count(index="pega-analysis-results")
                 metrics["unique_issues"] = unique_res["count"]
                 
-                # Pending Issues
-                pending_res = client.count(
-                    index="pega-analysis-results",
-                    body={"query": {"term": {"diagnosis.status": "PENDING"}}}
-                )
-                metrics["pending_issues"] = pending_res["count"]
-                
-                # Resolved Issues (RESOLVED, FALSE POSITIVE, COMPLETED, IGNORE)
+                # Resolved Issues (Strictly RESOLVED or IGNORE)
                 resolved_res = client.count(
                     index="pega-analysis-results",
-                    body={"query": {"terms": {"diagnosis.status": ["RESOLVED", "DIAGNOSIS COMPLETED", "IGNORE"]}}}
+                    body={"query": {"terms": {"diagnosis.status": ["RESOLVED", "IGNORE"]}}}
                 )
                 metrics["resolved_issues"] = resolved_res["count"]
+
+                # Pending Issues (Everything else)
+                metrics["pending_issues"] = metrics["unique_issues"] - metrics["resolved_issues"]
                 
         except:
              metrics["unique_issues"] = 0
