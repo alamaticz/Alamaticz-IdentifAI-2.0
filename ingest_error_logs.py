@@ -245,8 +245,9 @@ def extract_exception_info_from_log_entry(log_entry: Dict) -> Dict[str, str]:
     if not exception_message:
         exception_message = message
     
-    normalized_exception_message = normalize_error_pattern(exception_message)
-    normalized_message = normalize_error_pattern(message)
+    MAX_KEYWORD_LENGTH = 32000
+    normalized_exception_message = normalize_error_pattern(exception_message)[:MAX_KEYWORD_LENGTH]
+    normalized_message = normalize_error_pattern(message)[:MAX_KEYWORD_LENGTH]
     
     return {
         "exception_class": exception_class,
@@ -651,6 +652,12 @@ def ingest_failed_docs(file_path: str):
                     source_doc = doc
                     if "_source" in doc and "_index" in doc:
                          source_doc = doc["_source"]
+
+                    # Apply truncation fix to retried docs
+                    if "normalized_exception_message" in source_doc:
+                        source_doc["normalized_exception_message"] = source_doc["normalized_exception_message"][:32000]
+                    if "normalized_message" in source_doc:
+                        source_doc["normalized_message"] = source_doc["normalized_message"][:32000]
 
                     doc_str = json.dumps(source_doc, sort_keys=True)
                     doc_id = hashlib.md5(doc_str.encode('utf-8')).hexdigest()
