@@ -265,7 +265,7 @@ def fetch_recent_errors(client):
         return pd.DataFrame()
 
 
-def fetch_detailed_table_data(client, size=1000):
+def fetch_detailed_table_data(client, size=5000):
     """Fetch detailed data for the table."""
     query = {
         "size": size,
@@ -1495,7 +1495,7 @@ elif page == "Grouping Studio":
     
     if client:
         # Fetch detailed data (Same as Dashboard Page)
-        df_details = fetch_detailed_table_data(client, size=1000)
+        df_details = fetch_detailed_table_data(client, size=5000)
         
         if not df_details.empty:
             # --- Selection State Management ---

@@ -399,7 +399,7 @@ def ingest_log_stream(file_name: str, line_iterator):
                 try:
                     # --- FAST FILTER (Pre-JSON) ---
                     # Skips json.loads for 99% of logs (non-errors)
-                    if '"level":"ERROR"' not in line and '"exception"' not in line and '"level":"FATAL"' not in line and '"level":"FAIL"' not in line:
+                    if "ERROR" not in line and "exception" not in line and "FATAL" not in line and "FAIL" not in line:
                          skipped_safe += 1
                          continue
                     # ------------------------------
@@ -620,7 +620,31 @@ def ingest_file(file_path: str):
                     
                     with zip_ref.open(zip_info) as binary_file:
                         with io.TextIOWrapper(binary_file, encoding='utf-8', errors='ignore') as text_file:
-                            res = ingest_log_stream(zip_info.filename, text_file)
+                            # Read full content to support pretty-printed JSON or JSON Arrays
+                            content = text_file.read()
+                            
+                            try:
+                                # Attempt to parse the whole file as JSON (List or Single Dict)
+                                parsed_data = json.loads(content)
+                                
+                                # If it's a list, treat it as a stream of logs
+                                if isinstance(parsed_data, list):
+                                    print(f"Detected JSON Array with {len(parsed_data)} items.")
+                                    iterator = (json.dumps(item) for item in parsed_data)
+                                    res = ingest_log_stream(zip_info.filename, iterator)
+                                    
+                                elif isinstance(parsed_data, dict):
+                                    print("Detected Single JSON Object (Pretty Printed).")
+                                    iterator = [json.dumps(parsed_data)]
+                                    res = ingest_log_stream(zip_info.filename, iterator)
+                                else:
+                                    # Fallback for primitives? unlikely.
+                                    raise ValueError("Not a list or dict")
+                                    
+                            except json.JSONDecodeError:
+                                # Fallback to Line-by-Line (NDJSON or Raw Text)
+                                iterator = content.splitlines()
+                                res = ingest_log_stream(zip_info.filename, iterator)
                             
                             aggregated_result["total_indexed"] += res.get("total_indexed", 0)
                             aggregated_result["failed"] += res.get("failed", 0)
