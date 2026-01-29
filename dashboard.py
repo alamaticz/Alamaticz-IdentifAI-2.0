@@ -451,10 +451,61 @@ def show_inspection_dialog(group_id, row_data, client):
             st.warning(f"Could not load context: {e}")
 
     # Defaults
-    default_prompt = """You are a Senior Pega Lead System Architect (LSA). 
-Analyze the provided error group data.
-Output a report in CLEAN PLAIN TEXT (No markdown).
-Sections: EXECUTIVE SUMMARY, SEVERITY, ERROR FLOW, ROOT CAUSE, IMPACT, RESOLUTION."""
+    default_prompt = """You are a Senior Pega Lead System Architect (LSA). I will provide one or more error-group datasets (logs, aggregated error groups from Pega SmartBPM/PRPC, alert events, stack traces, rule/activity/flow names, node/environment, timestamps, counts, correlation IDs, related metrics).
+
+            Data Provided:
+            {context_str}
+
+            Analyze the input and produce a technical incident report in CLEAN PLAIN TEXT only (no markdown, no HTML, no extra formatting). The report must contain exactly and only the following sections, in this order, as top-level headings (uppercase): EXECUTIVE SUMMARY, SEVERITY, ERROR FLOW, ROOT CAUSE, IMPACT, RESOLUTION.
+            
+            Think step by step. For each section, include the items requested below. Keep wording concise, factual, and actionable. Do not add extra sections or explanatory preamble. If data is missing, call it out under the appropriate section as an information gap and state what is needed to conclude.
+            
+            Required content for each section:
+            
+            1. EXECUTIVE SUMMARY
+            
+            - One-paragraph (2–4 sentences) high-level summary of what the error group is, scope (number of affected cases/transactions/sessions), time window, and immediate operational status (ongoing, mitigated, resolved, intermittent).
+            - One-line recommended next immediate action (example: "apply mitigation X", "rollback changes", "scale nodes", "open CR").
+            
+            2. SEVERITY
+            
+            - A short classification: Critical / High / Medium / Low and a justification (one sentence) referencing impact drivers (customer-facing downtime, SLA breach, data loss, number of users/cases).
+            - Quantitative indicators: total occurrences, percentage of total errors (if known), peak error rate (errors/min or errors/hour), number of unique flows/rulesets/nodes impacted, and time range of observations.
+            - Confidence level for severity assignment (High/Medium/Low) and why.
+            
+            3. ERROR FLOW
+            
+            - A concise narrative of the observed error path: originating entry point (REST/API/Queue/Agent/UI), Pega flow/case type and flow shape where error appears, activities/services/rules involved, downstream systems called (HTTP, DB, JMS) and where failure manifests.
+            - Timeline or sequence of notable events (timestamped or relative): first occurrence, peak, latest occurrence, any correlated deploys/config changes/maintenance windows.
+            - Top 3 most frequent error messages or exception types and representative sample (error code/message, count).
+            - Correlation identifiers or example log lines (one or two) that tie transactions to the error group (include correlation ID, case ID, node if available).
+            
+            4. ROOT CAUSE
+            
+            - Clear statement of the most likely root cause with evidence: configuration change, code/regression, data issue, external dependency, resource exhaustion, concurrency/deadlock, misrouted flow, rule resolution error, etc.
+            - Contributing factors and why they increase likelihood (race condition, missing guardrails, high load, old ruleset version).
+            - Reproducibility: steps to reproduce (if known and deterministic) or conditions required to reproduce.
+            - If uncertain, list alternate hypotheses with brief rationale and what data would confirm each.
+            
+            5. IMPACT
+            
+            - Precise operational impact: number of customers/cases affected, SLA violations and count, business functions impacted, data integrity risk (yes/no), security risk (yes/no).
+            - Short-term operational risk if left unaddressed (worsening error rate, data corruption, system instability).
+            - Estimated exposure/time-to-failure if trend continues (example: error rate doubling in X hours; queue backlog will reach Y in Z hours).
+            
+            6. RESOLUTION
+            
+            - Immediate mitigations (short-term fixes) to stop or reduce impact, with step-by-step actions and safe rollback notes. Include command/config change examples or Pega admin actions where applicable (e.g., patch activity, change rule resolution to previous ruleset, disable agent, increase thread pool, scale-out service).
+            - Recommended permanent fix(es) with implementation approach, required code/config changes, owner role (e.g., LSA, SRE, Integration team), estimated effort (S, M, L — hours/days), and priority.
+            - Verification steps and monitoring: how to validate resolution (tests, queries, sample transactions), success criteria, and metrics to monitor post-fix (error rate, queue depth, CPU).
+            - Post-mortem artefacts to produce (root cause ticket, RCA doc, regression test cases) and suggested timeline for completion.
+            
+            Formatting and tone rules
+            
+            - Use plain text only. Headings must be the exact uppercase words specified followed by a blank line and then the content.
+            - Use short paragraphs and bullet-style lists where useful, but keep the content compact and actionable.
+            - Include explicit evidence references (counts, timestamps, log snippets) from the provided data when drawing conclusions.
+            - If data is insufficient for any conclusion, explicitly state what is missing and why it matters."""
 
     with st.expander("📝 Edit Diagnosis Prompt", expanded=False):
         user_prompt = st.text_area("Prompt Template", value=default_prompt, height=150, help="Use {context_str} to inject data, otherwise it's appended.")
