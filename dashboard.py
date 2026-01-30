@@ -238,13 +238,23 @@ def fetch_diagnosis_status_distribution(client):
         return pd.DataFrame()
 
 
-def fetch_recent_errors(client):
-    """Fetch recent errors (simulated trend) - aggregating by time."""
-    # Using date_histogram for efficiency
+def fetch_recent_errors(client, start_date=None, end_date=None):
+    """Fetch recent errors (simulated trend) - aggregating by time.
+    
+    Args:
+        client: OpenSearch client
+        start_date: Optional start date for filtering (datetime object)
+        end_date: Optional end date for filtering (datetime object)
+    """
+    # Build query with optional date range filter
     query = {
         "size": 0,
         "query": {
-            "match": {"log.level": "ERROR"}
+            "bool": {
+                "must": [
+                    {"match": {"log.level": "ERROR"}}
+                ]
+            }
         },
         "aggs": {
             "errors_over_time": {
@@ -255,6 +265,18 @@ def fetch_recent_errors(client):
             }
         }
     }
+    
+    # Add date range filter if provided
+    if start_date or end_date:
+        range_filter = {"range": {"ingestion_timestamp": {}}}
+        if start_date:
+            range_filter["range"]["ingestion_timestamp"]["gte"] = start_date.isoformat()
+        if end_date:
+            # Add one day to end_date to make it inclusive
+            end_date_inclusive = end_date + timedelta(days=1)
+            range_filter["range"]["ingestion_timestamp"]["lt"] = end_date_inclusive.isoformat()
+        query["query"]["bool"]["must"].append(range_filter)
+    
     try:
         response = client.search(body=query, index="pega-logs")
         buckets = response['aggregations']['errors_over_time']['buckets']
@@ -1348,12 +1370,36 @@ if page == "Dashboard":
         
         # 4. Trendline (Last)
         st.subheader("📈 Error Trend")
-        df_trend = fetch_recent_errors(client)
+        
+        # Date Filter UI
+        col_filter1, col_filter2 = st.columns(2)
+        with col_filter1:
+            trend_start_date = st.date_input(
+                "Start Date",
+                value=None,
+                key="trend_start_date",
+                help="Leave empty to show all data from the beginning"
+            )
+        with col_filter2:
+            trend_end_date = st.date_input(
+                "End Date",
+                value=None,
+                key="trend_end_date",
+                help="Leave empty to show all data until now"
+            )
+            
+        # Convert date inputs to datetime objects if provided
+        start_dt = datetime.combine(trend_start_date, datetime.min.time()) if trend_start_date else None
+        end_dt = datetime.combine(trend_end_date, datetime.min.time()) if trend_end_date else None
+        
+        # Fetch data with optional date filtering
+        df_trend = fetch_recent_errors(client, start_date=start_dt, end_date=end_dt)
+        
         if not df_trend.empty:
             fig_trend = px.area(df_trend, x='Time', y='Count')
             st.plotly_chart(fig_trend)
         else:
-            st.info("No recent error data found.")
+            st.info("No recent error data found for the selected date range.")
     else:
         st.error("Failed to connect to OpenSearch.")
 
