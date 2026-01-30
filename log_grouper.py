@@ -18,6 +18,7 @@ from opensearchpy import OpenSearch, helpers
 # Import local modules
 
 from log_normalizer import normalize_error_pattern
+from extract_rule_sequences import extract_rules_list
 
 # Load environment variables
 load_dotenv(override=True)
@@ -75,6 +76,93 @@ class OptimizeIndexSettings:
             self.client.indices.refresh(index=self.index_name)
         except Exception as e:
             print(f"[WARN] Failed to restore settings: {e}")
+
+def robust_scan(client, query, index, scroll='30m', size=500, request_timeout=300, **kwargs):
+    """
+    Generator that yields documents using manual scroll with robust retry logic for 429s.
+    Mimics usage of helpers.scan for this specific script.
+    """
+    import time
+    
+    # 1. Initial Search
+    resp = None
+    backoff = 2
+    max_retries = 10
+    
+    for attempt in range(max_retries):
+        try:
+            resp = client.search(
+                index=index,
+                body=query,
+                scroll=scroll,
+                size=size,
+                request_timeout=request_timeout,
+               **kwargs
+            )
+            break
+        except Exception as e:
+            # Check for 429 using string or status code if available
+            is_429 = "429" in str(e) or getattr(e, "status_code", None) == 429
+            if is_429:
+                print(f"[WARN] 429 Too Many Requests during initial search. Retrying in {backoff}s...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+            else:
+                print(f"[ERROR] Search failed: {e}")
+                raise e # Fatal if not 429
+    
+    if not resp:
+        raise Exception("Failed to initiate scan after retries.")
+
+    scroll_id = resp.get('_scroll_id')
+    hits = resp['hits']['hits']
+    
+    # Yield first batch
+    for hit in hits:
+        yield hit
+        
+    # 2. Scroll Loop
+    while scroll_id and hits:
+        backoff = 2
+        success = False
+        
+        for attempt in range(max_retries):
+            try:
+                resp = client.scroll(
+                    scroll_id=scroll_id,
+                    scroll=scroll
+                )
+                success = True
+                break
+            except Exception as e:
+                is_429 = "429" in str(e) or getattr(e, "status_code", None) == 429
+                if is_429:
+                     print(f"[WARN] 429 Too Many Requests during scroll. Retrying in {backoff}s...")
+                     time.sleep(backoff)
+                     backoff = min(backoff * 2, 60)
+                else:
+                     print(f"[ERROR] Scroll failed: {e}")
+                     # If scroll fails fatally, we might lose some data but we should try to exit cleanly?
+                     # Usually best to raise so we don't assume success.
+                     raise e
+        
+        if not success:
+             print("[ERROR] Failed to scroll after multiple retries. Aborting scan.")
+             break
+             
+        scroll_id = resp.get('_scroll_id')
+        hits = resp['hits']['hits']
+        
+        for hit in hits:
+            yield hit
+
+    # 3. Clear Scroll
+    if scroll_id:
+        try:
+            client.clear_scroll(scroll_id=scroll_id)
+        except:
+            pass
+
 
 
 def load_custom_patterns(client):
@@ -375,7 +463,7 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
     else:
         print("[INFO] Starting scan...")
 
-    scanner = helpers.scan(
+    scanner = robust_scan(
         client,
         query=query,
         index=SOURCE_INDEX,
@@ -430,12 +518,21 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
             }
         }
         
+
         if (params.new_msg_sigs != null) {
                 for (def item : params.new_msg_sigs) {
                     if (!ctx._source.message_signatures.contains(item)) {
                     ctx._source.message_signatures.add(item);
                     }
             }
+        }
+        
+        if (params.new_rules != null && (ctx._source.rules == null || ctx._source.rules.size() == 0)) {
+            ctx._source.rules = params.new_rules;
+        }
+        
+        if (params.new_rule_count != null && (ctx._source.rule_count == null || ctx._source.rule_count == 0)) {
+            ctx._source.rule_count = params.new_rule_count;
         }
 
         ctx._source.representative_log = params.rep_log;
@@ -541,7 +638,9 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
                 "raw_log_ids": [],
                 "exception_signatures": set(),
                 "message_signatures": set(),
-                "representative_log": rep_log
+                "representative_log": rep_log,
+                "rules": [],
+                "rule_count": 0
             }
         
         entry = group_buffer[group_id]
@@ -559,6 +658,13 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
         entry["raw_log_ids"].append(doc_id)
         if norm_exc_message: entry["exception_signatures"].add(norm_exc_message)
         if norm_message: entry["message_signatures"].add(norm_message)
+        
+        # Extract rules if RuleSequence and not yet extracted
+        if group_type == "RuleSequence" and not entry["rules"]:
+             extracted = extract_rules_list(group_signature_string)
+             if extracted:
+                 entry["rules"] = extracted
+                 entry["rule_count"] = len(extracted)
         
         buffer_count += 1
         
@@ -580,6 +686,8 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
                     "exception_signatures": list(data["exception_signatures"]),
                     "message_signatures": list(data["message_signatures"]),
                     "representative_log": data["representative_log"],
+                    "rules": data.get("rules", []),
+                    "rule_count": data.get("rule_count", 0),
                     "diagnosis": {
                         "status": "PENDING"
                     }
@@ -599,7 +707,9 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
                             "new_ids": unique_ids,
                             "new_exc_sigs": list(data["exception_signatures"]),
                             "new_msg_sigs": list(data["message_signatures"]),
-                            "rep_log": data["representative_log"]
+                            "rep_log": data["representative_log"],
+                            "new_rules": data.get("rules", []),
+                            "new_rule_count": data.get("rule_count", 0)
                         }
                     },
                     "upsert": upsert_doc
@@ -638,6 +748,8 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
                     "exception_signatures": list(data["exception_signatures"]),
                     "message_signatures": list(data["message_signatures"]),
                     "representative_log": data["representative_log"],
+                    "rules": data.get("rules", []),
+                    "rule_count": data.get("rule_count", 0),
                     "diagnosis": {
                         "status": "PENDING"
                     }
@@ -657,7 +769,9 @@ def process_logs(limit=None, batch_size=5000, ignore_checkpoint=False, session_i
                             "new_ids": unique_ids,
                             "new_exc_sigs": list(data["exception_signatures"]),
                             "new_msg_sigs": list(data["message_signatures"]),
-                            "rep_log": data["representative_log"]
+                            "rep_log": data["representative_log"],
+                            "new_rules": data.get("rules", []),
+                            "new_rule_count": data.get("rule_count", 0)
                         }
                     },
                     "upsert": upsert_doc
